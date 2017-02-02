@@ -1,3 +1,163 @@
+Aurora 0.17.0
+--------------------------------------------------------------------------------
+## Bug
+    * [AURORA-1782] - Thermos Executor is not handling apostrophe gracefully
+    * [AURORA-1802] - AttributeAggregate slows down scheduling of jobs with many instances
+    * [AURORA-1801] - TaskObserver thread stops refreshing after filesystem race condition
+    * [AURORA-1840] - Issue with Curator-backed discovery under heavy load
+    * [AURORA-1809] - Investigate flaky test TestRunnerKillProcessGroup.test_pg_is_killed
+    * [AURORA-1780] - Offers with unknown resources types to Aurora crash the scheduler
+    * [AURORA-1783] - Probable http connection leak
+    * [AURORA-1879] - /pendingTasks endpoint shows 500 HTTP Error when there are multiple pending tasks with the same key
+    * [AURORA-1795] - Internal server error in scheduler Thrift API on missing Content-Type
+    * [AURORA-1788] - vagrant up does not properly configure network adapters
+    * [AURORA-1789] - Incorrect --mesos_containerizer_path value results in thermos failure loop
+    * [AURORA-1798] - resolv.conf is not copied when using the Mesos containerizer with a Docker image
+    * [AURORA-1541] - Observer logs are noisy
+    * [AURORA-1793] - Revert Commit ca683 which is not backwards compatible
+    * [AURORA-1784] - e2e tests fail in http_example_unified_appc due to slow image copies
+    * [AURORA-1684] - Cron tasks are sanitized multiple times (once when being created via the API, and again when actually being triggered)
+    * [AURORA-1808] - Thermos executor should send SIGTERM to daemonized processes 
+    * [AURORA-1792] - Executor does not log full task information.
+    * [AURORA-1791] - Commit ca683 is not backwards compatible.
+    * [AURORA-1875] - The thriftw compatibility thrift binary check is too loose
+
+## Epic
+    * [AURORA-894] - Server updater should watch healthy instances
+
+## Story
+    * [AURORA-1504] - aurora job inspect should have a --write-json option
+    * [AURORA-1847] - Eliminate sequential scan in MemTaskStore.getJobKeys()
+    * [AURORA-1867] - Consider reserving for multiple tasks per preemption round
+    * [AURORA-1868] - Evaluate multiple preemption proposals per round
+    * [AURORA-1815] - Fix checksums for packages on bintray
+    * [AURORA-1014] - Client binding_helper to resolve docker label to a stable ID at create
+    * [AURORA-1794] - Scheduler fails to start if -enable_revocable_ram is toggled
+    * [AURORA-655] - Order job update events and instance events by ID rather than timestamp
+    * [AURORA-1826] - Expose Thrift server request workload stats
+
+## Task
+    * [AURORA-1762] - /pendingtasks endpoint should show reason tasks are pending
+    * [AURORA-1785] - Populate curator latches with scheduler information
+    * [AURORA-1834] - Expose stats on undelivered event bus events
+    * [AURORA-1828] - Expose stats on the number of offers evaluated before a task is assigned
+    * [AURORA-1857] - Expose timing stats on PendingTaskProcessor runs
+    * [AURORA-1851] - Expose stats on JobUpdateAction transitions
+    * [AURORA-1859] - Expose stats on statically banned offers
+    * [AURORA-1876] - Expose stats on scheduler rate limiter
+    * [AURORA-1874] - Expose stats on SlotSizeCounter runs
+    * [AURORA-1838] - Expose stats on ZooKeeper connection state
+    * [AURORA-1813] - Bump Mesos support to 1.1.0
+    * [AURORA-1820] - Reduce storage write lock contention by adopting Double-Checked Locking pattern in TimedOutTaskHandler
+    * [AURORA-1835] - Expose finer grained offer veto stats
+    * [AURORA-1878] - Increased executor logs can lead to task's running out of disk space
+    * [AURORA-1821] - Bump Guava to 20
+    * [AURORA-1856] - Expose stats on deleted job updates in JobUpdateHistoryPruner
+    * [AURORA-1861] - Remove duplicate Snapshot fields for DB stores
+    * [AURORA-1831] - Tweak logging pattern to improve performance
+    * [AURORA-1224] - Add a new "min_consecutive_health_checks" setting in .aurora config
+    * [AURORA-1225] - Modify executor state transition logic to rely on health checks (if enabled)
+    * [AURORA-1881] - Capture stderr from output for shell health check failures.
+
+
+Aurora 0.16.0
+--------------------------------------------------------------------------------
+## Bug
+    * [AURORA-1739] - createJob thrift api for golang consistenly failing with empty CronSchedule
+    * [AURORA-1745] - Aurora master no longer populates `ExecutorInfo.source`
+    * [AURORA-1715] - Dead links on website
+    * [AURORA-1753] - Thermos does not kill processes that setuid to another user. 
+    * [AURORA-1719] - Aurora warns about every terminated executor
+    * [AURORA-1775] - Updating pants to 1.1.0-rc7 breaks the make-pycharm-virtualenv script
+    * [AURORA-1741] - Fix pystachio binding bug introduced by AURORA-1710
+    * [AURORA-1724] - Thermos runner fails if log rotation is enabled
+    * [AURORA-1761] - Sandbox taskfs setup fails (groupadd error)
+    * [AURORA-1061] - Scheduler cluster deadlock during leader election if zookeeper connectivity is interrupted
+    * [AURORA-1729] - Unclean curator teardown when scheduler fails a log write.
+    * [AURORA-1620] - Client sdists cannot be converted to a wheel
+    * [AURORA-327] - Aurora shutdown blocks when attempting to abdicate leadership and zk ensemble is down
+    * [AURORA-1727] - The thrift compiler fails to bootstrap under modern gcc
+    * [AURORA-1752] - uncaught exception in executor's process_collector_psutil()
+    * [AURORA-1728] - e2e tests require entering vagrant user's password 3x in fresh environments
+    * [AURORA-1755] - Mounts created by executor when using filesystem isolation are leaking to the host filesystem's mtab
+    * [AURORA-1777] - aurora_admin client unable to drain hosts
+
+## Epic
+    * [AURORA-1679] - Aurora 0.14.0 deprecations
+    * [AURORA-1634] - Support launching tasks using the Mesos unified containerizer
+
+## Story
+    * [AURORA-1661] - Scheduler leader failed to re-announce itself after ZK name was changed
+    * [AURORA-1640] - Write enduser documentation for the Unified Containerizer support
+    * [AURORA-1656] - Document tier concept
+
+## Sub-task
+    * [AURORA-1772] - Do not resend TaskStateChange events every time a scheduler starts
+
+## Task
+    * [AURORA-1711] - Allow client to store metadata on Update entity
+    * [AURORA-1743] - Support Thrift Binary Protocol 
+    * [AURORA-1223] - Modify scheduler updater to not use "watch_secs" for health-check enabled jobs
+    * [AURORA-1740] - Upgrade to Mesos 1.0.0
+    * [AURORA-1690] - Allow for isolating the executor's filesystem from the task's
+    * [AURORA-1222] - Modify stats and SLA metrics to properly account for STARTING
+    * [AURORA-1764] - Modify getJobUpdateDetails to accept a JobUpdateQuery
+    * [AURORA-1688] - Change framework_name default value from 'TwitterScheduler' to 'aurora'
+    * [AURORA-1434] - Update Aurora Tutorial
+    * [AURORA-1602] - Add aurora_admin command to trigger reconciliation 
+    * [AURORA-1754] - Containerizer documentation uses deprecated syntax in the example code 
+    * [AURORA-1221] - Modify task state machine to treat STARTING as a new active state
+    * [AURORA-1681] - Remove deprecated --restart-threshold option from 'aurora job restart'
+    * [AURORA-1710] - Make 'tier' required and remove support for 'production' flag in Job configuration
+    * [AURORA-1721] - Support user initiated rollback 
+    * [AURORA-1736] - Display reservations and persistent volumes in /offers debug http endpoint
+
+
+Aurora 0.15.0
+--------------------------------------------------------------------------------
+## Task
+    * [AURORA-1725] - Expose tier configurations as a debug page
+    * [AURORA-1458] - Add tier into the UI "show config" summary
+    * [AURORA-1720] - Broken link in http://aurora.apache.org/
+
+Aurora 0.14.0
+--------------------------------------------------------------------------------
+## Bug
+    * [AURORA-1660] - Download page must not link to snapshots / nightly builds
+    * [AURORA-1668] - http://aurora.apache.org/documentation/latest/ is mainly broken for 0.13.0
+    * [AURORA-1588] - Unnecessary HealthCheckConfig endpoint warning
+    * [AURORA-1568] - rpm builder does not handle snapshot versions
+    * [AURORA-1709] - After rb/46835 job key's role is required to exist as a user
+    * [AURORA-1665] - DbCronJobStore is missing @Timed annotations
+    * [AURORA-1687] - Nightly packaging builds broken by ppa:openjdk-r java packaging shift.
+    * [AURORA-1673] - Links going out from http://aurora.apache.org/documentation/0.13.0/ 404
+    * [AURORA-1682] - https://builds.apache.org/job/aurora-packaging-nightly is broken
+
+## Story
+    * [AURORA-572] - Provide control over listening network interfaces/addresses
+    * [AURORA-300] - changelog generation should document potentially breaking API changes
+    * [AURORA-1145] - Remove --no-fast from python test invocation
+    * [AURORA-1658] - Aurora does not allow to configure the Mesos offer filter duration
+    * [AURORA-1098] - end-to-end test should use docker
+
+## Task
+    * [AURORA-1683] - Implement an optional webhook parameter to scheduler to POST TaskStateChange events
+    * [AURORA-1616] - Support for preemptible tasks via tier configuration
+    * [AURORA-1667] - Sort out vagrant box versioning
+    * [AURORA-1636] - Update Scheduler to accept tasks with images
+    * [AURORA-1637] - Update Executor to support launching tasks with images.
+    * [AURORA-1451] - Refer to "Mesos Agent" instead of "Mesos Slave" in documentation
+    * [AURORA-1450] - Refer to "Mesos Agent" instead of "Mesos Slave" in UI
+    * [AURORA-1672] - Duplicate task events displayed in UI
+    * [AURORA-1468] - Replace org.apache.aurora.commons.zookeeper with a Apache Curator
+    * [AURORA-945] - Advertise Aurora as "Aurora" to Mesos master.
+    * [AURORA-1638] - Update MesosTaskFactory to send tasks with images configured to use the unified containerizer
+    * [AURORA-1639] - Update client to allow configuring tasks with images.
+    * [AURORA-1449] - Rename /slaves endpoint to /agents
+    * [AURORA-1631] - Consider removing --restart-threshold from "aurora job restart"
+    * [AURORA-1624] - Thrift API for retrieving scheduler tier configuration
+
+
 Aurora 0.13.0
 --------------------------------------------------------------------------------
 ## Bug

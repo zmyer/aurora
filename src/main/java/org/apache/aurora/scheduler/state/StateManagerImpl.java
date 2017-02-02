@@ -27,7 +27,6 @@ import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
-import com.google.common.base.Throwables;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -191,7 +190,9 @@ public class StateManagerImpl implements StateManager {
 
     Preconditions.checkState(
         changeResult == SUCCESS,
-        "Attempt to assign task " + taskId + " to " + slaveHost + " failed");
+        "Attempt to assign task %s to %s failed",
+        taskId,
+        slaveHost);
 
     return mutated.getAssignedTask();
   }
@@ -203,7 +204,7 @@ public class StateManagerImpl implements StateManager {
           return InetAddress.getLocalHost().getHostName();
         } catch (UnknownHostException e) {
           LOG.error("Failed to get self hostname.");
-          throw Throwables.propagate(e);
+          throw new RuntimeException(e);
         }
       });
 
@@ -286,7 +287,8 @@ public class StateManagerImpl implements StateManager {
         case SAVE_STATE:
           Preconditions.checkState(
               upToDateTask.isPresent(),
-              "Operation expected task " + taskId + " to be present.");
+              "Operation expected task %s to be present.",
+              taskId);
 
           Optional<IScheduledTask> mutated = taskStore.mutateTask(taskId, task1 -> {
             ScheduledTask mutableTask = task1.newBuilder();
@@ -304,7 +306,8 @@ public class StateManagerImpl implements StateManager {
         case RESCHEDULE:
           Preconditions.checkState(
               upToDateTask.isPresent(),
-              "Operation expected task " + taskId + " to be present.");
+              "Operation expected task %s to be present.",
+              taskId);
           LOG.info("Task being rescheduled: " + taskId);
 
           ScheduleStatus newState;
@@ -341,7 +344,8 @@ public class StateManagerImpl implements StateManager {
         case DELETE:
           Preconditions.checkState(
               upToDateTask.isPresent(),
-              "Operation expected task " + taskId + " to be present.");
+              "Operation expected task %s to be present.",
+              taskId);
 
           events.add(deleteTasks(taskStore, ImmutableSet.of(taskId)));
           break;

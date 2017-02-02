@@ -66,11 +66,11 @@ from apache.thermos.config.loader import (
     ThermosTaskValidator,
     ThermosTaskWrapper
 )
-from apache.thermos.config.schema import ThermosContext
+from apache.thermos.config.schema import Logger, RotatePolicy, ThermosContext
 
 from .helper import TaskRunnerHelper
 from .muxer import ProcessMuxer
-from .process import LoggerDestination, LoggerMode, Process
+from .process import LoggerMode, Process
 
 from gen.apache.thermos.ttypes import (
     ProcessState,
@@ -421,7 +421,7 @@ class TaskRunner(object):
                universal_handler=None, planner_class=TaskPlanner, hostname=None,
                process_logger_destination=None, process_logger_mode=None,
                rotate_log_size_mb=None, rotate_log_backups=None,
-               preserve_env=False):
+               preserve_env=False, mesos_containerizer_path=None, container_sandbox=None):
     """
       required:
         task (config.Task) = the task to run
@@ -449,6 +449,10 @@ class TaskRunner(object):
         rotate_log_backups (integer) = The maximum number of rotated stdout/stderr log backups.
         preserve_env (boolean) = whether or not env variables for the runner should be in the
                                  env for the task being run
+        mesos_containerizer_path = the path to the mesos-containerizer executable that will be used
+                                   to isolate the task's filesystem (if using a filesystem image).
+        container_sandbox = the path within the isolated filesystem where the task's sandbox is
+                            mounted.
     """
     if not issubclass(planner_class, TaskPlanner):
       raise TypeError('planner_class must be a TaskPlanner.')
@@ -501,6 +505,7 @@ class TaskRunner(object):
         process_filter=lambda proc: proc.final().get() is True)
     self._chroot = chroot
     self._sandbox = sandbox
+    self._container_sandbox = container_sandbox
     self._terminal_state = None
     self._ckpt = None
     self._process_map = dict((p.name().get(), p) for p in self._task.processes())
@@ -511,6 +516,7 @@ class TaskRunner(object):
     self._watcher = ProcessMuxer(self._pathspec)
     self._state = RunnerState(processes={})
     self._preserve_env = preserve_env
+    self._mesos_containerizer_path = mesos_containerizer_path
 
     # create runner state
     universal_handler = universal_handler or TaskRunnerUniversalHandler
@@ -720,7 +726,12 @@ class TaskRunner(object):
       logger_mode=logger_mode,
       rotate_log_size=rotate_log_size,
       rotate_log_backups=rotate_log_backups,
-      preserve_env=self._preserve_env)
+      preserve_env=self._preserve_env,
+      mesos_containerizer_path=self._mesos_containerizer_path,
+      container_sandbox=self._container_sandbox)
+
+  _DEFAULT_LOGGER = Logger()
+  _DEFAULT_ROTATION = RotatePolicy()
 
   def _build_process_logger_args(self, process):
     """
@@ -730,27 +741,36 @@ class TaskRunner(object):
       If no configuration (neither flags nor process config), default to
       "standard" mode.
     """
-    destination, mode, size, backups = None, None, None, None
+
+    destination, mode, size, backups = (self._DEFAULT_LOGGER.destination().get(),
+                                        self._DEFAULT_LOGGER.mode().get(),
+                                        None,
+                                        None)
+
     logger = process.logger()
     if logger is Empty:
       if self._process_logger_destination:
         destination = self._process_logger_destination
-      else:
-        destination = LoggerDestination.FILE
-
       if self._process_logger_mode:
-        mode = self._process_logger_mode,
-        size = Amount(self._rotate_log_size_mb, Data.MB)
-        backups = self._rotate_log_backups
-      else:
-        mode = LoggerMode.STANDARD
+        mode = self._process_logger_mode
     else:
       destination = logger.destination().get()
       mode = logger.mode().get()
-      if mode == LoggerMode.ROTATE:
+
+    if mode == LoggerMode.ROTATE:
+      size = Amount(self._DEFAULT_ROTATION.log_size().get(), Data.BYTES)
+      backups = self._DEFAULT_ROTATION.backups().get()
+      if logger is Empty:
+        if self._rotate_log_size_mb:
+          size = Amount(self._rotate_log_size_mb, Data.MB)
+        if self._rotate_log_backups:
+          backups = self._rotate_log_backups
+      else:
         rotate = logger.rotate()
-        size = Amount(rotate.log_size().get(), Data.BYTES)
-        backups = rotate.backups().get()
+        if rotate is not Empty:
+          size = Amount(rotate.log_size().get(), Data.BYTES)
+          backups = rotate.backups().get()
+
     return destination, mode, size, backups
 
   def deadlocked(self, plan=None):
@@ -853,6 +873,8 @@ class TaskRunner(object):
     return len(launched) > 0
 
   def _terminate_plan(self, plan):
+    TaskRunnerHelper.terminate_orphans(self.state)
+
     for process in plan.running:
       last_run = self._current_process_run(process)
       if last_run and last_run.state in (ProcessState.FORKED, ProcessState.RUNNING):

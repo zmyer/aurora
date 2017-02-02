@@ -42,14 +42,6 @@ Host *
 EOF
 }
 
-function enable_gradle_daemon {
-  install -o vagrant -g vagrant -d -m 0755 /home/vagrant/.gradle
-  cat > /home/vagrant/.gradle/gradle.properties <<EOF
-org.gradle.daemon=true
-EOF
-  chown vagrant:vagrant /home/vagrant/.gradle/gradle.properties
-}
-
 function configure_netrc {
   cat > /home/vagrant/.netrc <<EOF
 machine $(hostname -f)
@@ -59,8 +51,9 @@ EOF
   chown vagrant:vagrant /home/vagrant/.netrc
 }
 
-function sudoless_docker_setup {
+function docker_setup {
   gpasswd -a vagrant docker
+  echo 'DOCKER_OPTS="--storage-driver=aufs"' | sudo tee --append /etc/default/docker
   service docker restart
 }
 
@@ -75,6 +68,8 @@ function prepare_sources {
   cp /vagrant/examples/vagrant/mesos_config/etc_mesos-master/* /etc/mesos-master
   stop mesos-master || true
   stop mesos-slave || true
+  # Remove slave metadata to ensure slave start does not pick up old state.
+  rm -rf /var/lib/mesos/meta/slaves/latest
   start mesos-master
   start mesos-slave
 
@@ -98,7 +93,6 @@ prepare_extras
 install_cluster_config
 install_ssh_config
 start_services
-enable_gradle_daemon
 configure_netrc
-sudoless_docker_setup
+docker_setup
 su vagrant -c "aurorabuild all"

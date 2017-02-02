@@ -26,17 +26,19 @@ fi
 set -u -e -x
 set -o pipefail
 
-readonly TEST_SCHEDULER_IP=192.168.33.7
+readonly TEST_SLAVE_IP=192.168.33.7
 
 _curl() { curl --silent --fail --retry 4 --retry-delay 10 "$@" ; }
 
 tear_down() {
   set +x  # Disable command echo, as this makes it more difficult see which command failed.
 
-  for job in http_example http_example_revocable http_example_docker; do
-    aurora update abort devcluster/vagrant/test/$job || true >/dev/null 2>&1
+  for job in http_example http_example_watch_secs http_example_revocable http_example_docker http_example_unified_appc http_example_unified_docker; do
+    aurora update abort devcluster/vagrant/test/$job >/dev/null 2>&1 || true
     aurora job killall --no-batching devcluster/vagrant/test/$job >/dev/null 2>&1
   done
+
+  sudo mv /etc/aurora/clusters.json.old /etc/aurora/clusters.json >/dev/null 2>&1 || true
 }
 
 collect_result() {
@@ -45,9 +47,9 @@ collect_result() {
     echo "OK (all tests passed)"
   else
     echo "!!! FAIL (something returned non-zero) for $BASH_COMMAND"
-    # Attempt to clean up any state we left behind.
-    tear_down
   fi
+  # Attempt to clean up any state we left behind.
+  tear_down
   exit $RETCODE
 }
 
@@ -58,7 +60,7 @@ check_url_live() {
 test_file_removed() {
   local _file=$1
   local _success=0
-  for i in $(seq 1 10); do
+  for i in {1..10}; do
     if [[ ! -e $_file ]]; then
       _success=1
       break
@@ -66,7 +68,7 @@ test_file_removed() {
     sleep 1
   done
 
-  if [[ "$_success" -ne "1" ]]; then
+  if [[ $_success -ne 1 ]]; then
     echo "File was not removed."
     exit 1
   fi
@@ -78,7 +80,7 @@ test_version() {
 }
 
 test_health_check() {
-  [[ $(_curl "localhost:8081/health") == 'OK' ]]
+  [[ $(_curl "$TEST_SLAVE_IP:8081/health") == 'OK' ]]
 }
 
 test_config() {
@@ -117,7 +119,7 @@ test_scheduler_ui() {
   local _role=$1 _env=$2 _job=$3
 
   # Check that scheduler UI pages shown
-  base_url="localhost:8081"
+  base_url="$TEST_SLAVE_IP:8081"
   check_url_live "$base_url/leaderhealth"
   check_url_live "$base_url/scheduler"
   check_url_live "$base_url/scheduler/$_role"
@@ -128,7 +130,7 @@ test_observer_ui() {
   local _cluster=$1 _role=$2 _job=$3
 
   # Check the observer page
-  observer_url="localhost:1338"
+  observer_url="$TEST_SLAVE_IP:1338"
   check_url_live "$observer_url"
 
   # Poll the observer, waiting for it to receive and show information about the task.
@@ -152,7 +154,7 @@ test_observer_ui() {
 test_restart() {
   local _jobkey=$1
 
-  aurora job restart --batch-size=2 $_jobkey
+  aurora job restart --batch-size=2 --watch-secs=10 $_jobkey
 }
 
 assert_update_state() {
@@ -244,20 +246,25 @@ test_announce() {
   validate_serverset "/aurora/$_jobkey"
 }
 
-test_run() {
-  local _jobkey=$1
-
+setup_ssh() {
   # Create an SSH public key so that local SSH works without a password.
   local _ssh_key=~/.ssh/id_rsa
   rm -f ${_ssh_key}*
   ssh-keygen -t rsa -N "" -f $_ssh_key
+  # Ensure a new line for the new key to start on.
+  # See: https://issues.apache.org/jira/browse/AURORA-1728
+  echo >> ~/.ssh/authorized_keys
   cat ${_ssh_key}.pub >> ~/.ssh/authorized_keys
+}
 
-  # Using the sandbox contents as a proxy for functioning SSH.  List sandbox contents, we expect
-  # 3 instances of the same thing - our python script.
-  sandbox_contents=$(aurora task run $_jobkey 'ls' | awk '{print $2}' | sort | uniq -c)
+test_run() {
+  local _jobkey=$1
+
+  # Using the sandbox contents as a proxy for functioning SSH.  List sandbox contents, looking for
+  # the .logs directory. We expect to find 3 instances.
+  sandbox_contents=$(aurora task run $_jobkey 'ls -a' | awk '{print $2}' | grep ".logs" | sort | uniq -c)
   echo "$sandbox_contents"
-  [[ "$sandbox_contents" = "      3 http_example.py" ]]
+  [[ "$sandbox_contents" = "      3 .logs" ]]
 }
 
 test_kill() {
@@ -282,7 +289,7 @@ test_discovery_info() {
     return 0
   fi
 
-  framework_info=$(curl --silent '192.168.33.7:5050/state' | jq '.frameworks | map(select(.name == "TwitterScheduler"))')
+  framework_info=$(curl --silent '192.168.33.7:5050/state' | jq '.frameworks | map(select(.name == "Aurora"))')
   if [[ -z $framework_info ]]; then
     echo "Cannot get framework info for $framework"
     exit 1
@@ -314,6 +321,12 @@ test_discovery_info() {
   fi
 }
 
+test_thermos_profile() {
+  read_env_output=$(aurora task ssh $_jobkey/0 --command='tail -1 .logs/read_env/0/stdout' |tr -d '\r\n' 2>/dev/null)
+  echo "$read_env_output"
+  [[ "$read_env_output" = "hello" ]]
+}
+
 test_http_example() {
   local _cluster=$1 _role=$2 _env=$3
   local _base_config=$4 _updated_config=$5
@@ -332,6 +345,8 @@ test_http_example() {
   test_scheduler_ui $_role $_env $_job
   test_observer_ui $_cluster $_role $_job
   test_discovery_info $_task_id_prefix $_discovery_name
+  test_thermos_profile $_jobkey
+  test_file_mount $_cluster $_role $_env $_job
   test_restart $_jobkey
   test_update $_jobkey $_updated_config $_cluster $_bind_parameters
   test_update_fail $_jobkey $_base_config  $_cluster $_bad_healthcheck_config $_bind_parameters
@@ -343,7 +358,7 @@ test_http_example() {
   test_quota $_cluster $_role
 }
 
-test_http_revocable_example() {
+test_http_example_basic() {
   local _cluster=$1 _role=$2 _env=$3
   local _base_config=$4
   local _job=$7
@@ -359,6 +374,10 @@ test_admin() {
   echo '== Testing admin commands'
   echo '== Getting leading scheduler'
   aurora_admin get_scheduler $_cluster | grep ":8081"
+
+  # host maintenance commands currently have a separate entry point and use their own api client.
+  # Until we address that, at least verify that the command group still works.
+  aurora_admin host_status --hosts=$TEST_SLAVE_IP $_cluster
 }
 
 test_ephemeral_daemon_with_final() {
@@ -373,6 +392,19 @@ test_ephemeral_daemon_with_final() {
   test_job_status $_cluster $_role $_env $_job
   touch $_stop_file  # Stops 'main_process'.
   test_file_removed $_stop_file  # Removed by 'final_process'.
+}
+
+test_daemonizing_process() {
+  local _cluster=$1 _role=$2 _env=$3 _job=$4 _config=$5
+  local _jobkey="$_cluster/$_role/$_env/$_job"
+  local _term_file=$(mktemp)
+  local _extra_args="--bind term_file=$_term_file"
+
+  test_create $_jobkey $_config $_extra_args
+  test_observer_ui $_cluster $_role $_job
+  test_job_status $_cluster $_role $_env $_job
+  test_kill $_jobkey
+  test_file_removed $_term_file
 }
 
 restore_netrc() {
@@ -396,27 +428,79 @@ test_basic_auth_unauthenticated() {
   restore_netrc
 }
 
-test_appc() {
+setup_image_stores() {
   TEMP_PATH=$(mktemp -d)
   pushd "$TEMP_PATH"
 
-  # build the appc image from the docker image
-  docker save -o http_example-latest.tar http_example
-  docker2aci http_example-latest.tar
+  # build the docker image and save it as a tarball.
+  sudo docker build -t http_example_netcat -f "${TEST_ROOT}/Dockerfile.netcat" ${TEST_ROOT}
+  docker save -o http_example_netcat-latest.tar http_example_netcat
 
-  APPC_IMAGE_ID="sha512-$(sha512sum http_example-latest.aci | awk '{print $1}')"
+  DOCKER_IMAGE_DIRECTORY="/tmp/mesos/images/docker"
+  sudo mkdir -p "$DOCKER_IMAGE_DIRECTORY"
+  sudo cp http_example_netcat-latest.tar "$DOCKER_IMAGE_DIRECTORY/http_example_netcat:latest.tar"
+
+  # build the appc image from the docker image
+  docker2aci http_example_netcat-latest.tar
+
+  APPC_IMAGE_ID="sha512-$(sha512sum http_example_netcat-latest.aci | awk '{print $1}')"
+  export APPC_IMAGE_ID
   APPC_IMAGE_DIRECTORY="/tmp/mesos/images/appc/images/$APPC_IMAGE_ID"
 
   sudo mkdir -p "$APPC_IMAGE_DIRECTORY"
-  sudo tar -xf http_example-latest.aci -C "$APPC_IMAGE_DIRECTORY"
+  sudo tar -xf http_example_netcat-latest.aci -C "$APPC_IMAGE_DIRECTORY"
   # This restart is necessary for mesos to pick up the image from the local store.
   sudo restart mesos-slave
 
   popd
   rm -rf "$TEMP_PATH"
+}
 
-  TEST_JOB_APPC_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_APPC" "--bind appc_image_id=$APPC_IMAGE_ID")
+setup_docker_registry() {
+  # build the test docker image
+  sudo docker build -t http_example -f "${TEST_ROOT}/Dockerfile.python" ${TEST_ROOT}
+  docker tag http_example:latest aurora.local:5000/http_example:latest
+  docker login -p testpassword -u testuser http://aurora.local:5000
+  docker push aurora.local:5000/http_example:latest
+  sudo mv /etc/aurora/clusters.json /etc/aurora/clusters.json.old
+  sudo sh -c "cat /etc/aurora/clusters.json.old | jq 'map(. + {docker_registry:\"http://aurora.local:5000\"})' > /etc/aurora/clusters.json"
+}
+
+test_appc_unified() {
+  num_mounts_before=$(mount |wc -l |tr -d '\n')
+
+  TEST_JOB_APPC_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_UNIFIED_APPC" "--bind appc_image_id=$APPC_IMAGE_ID")
   test_http_example "${TEST_JOB_APPC_ARGS[@]}"
+
+  num_mounts_after=$(mount |wc -l |tr -d '\n')
+  # We want to be sure that running the isolated task did not leak any mounts.
+  [[ "$num_mounts_before" = "$num_mounts_after" ]]
+}
+
+test_file_mount() {
+  local _cluster=$1 _role=$2 _env=$3 _job=$4
+
+  if [[ "$_job" = "$TEST_JOB_UNIFIED_DOCKER" ]]; then
+    local _jobkey="$_cluster/$_role/$_env/$_job"
+
+    verify_file_mount_output=$(aurora task ssh $_jobkey/0 --command='tail -1 .logs/verify_file_mount/0/stdout' |tr -d '\r\n' 2>/dev/null)
+    echo "$verify_file_mount_output"
+    [[ "$verify_file_mount_output" = "$(cat /vagrant/.auroraversion |tr -d '\r\n')" ]]
+    return $?
+  fi
+
+  return 0
+}
+
+test_docker_unified() {
+  num_mounts_before=$(mount |wc -l |tr -d '\n')
+
+  TEST_JOB_DOCKER_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_UNIFIED_DOCKER")
+  test_http_example "${TEST_JOB_DOCKER_ARGS[@]}"
+
+  num_mounts_after=$(mount |wc -l |tr -d '\n')
+  # We want to be sure that running the isolated task did not leak any mounts.
+  [[ "$num_mounts_before" = "$num_mounts_after" ]]
 }
 
 RETCODE=1
@@ -428,14 +512,19 @@ TEST_CLUSTER=devcluster
 TEST_ROLE=vagrant
 TEST_ENV=test
 TEST_JOB=http_example
+TEST_JOB_WATCH_SECS=http_example_watch_secs
 TEST_JOB_REVOCABLE=http_example_revocable
+TEST_JOB_GPU=http_example_gpu
 TEST_JOB_DOCKER=http_example_docker
-TEST_JOB_APPC=http_example_appc
+TEST_JOB_UNIFIED_APPC=http_example_unified_appc
+TEST_JOB_UNIFIED_DOCKER=http_example_unified_docker
 TEST_CONFIG_FILE=$EXAMPLE_DIR/http_example.aurora
 TEST_CONFIG_UPDATED_FILE=$EXAMPLE_DIR/http_example_updated.aurora
 TEST_BAD_HEALTHCHECK_CONFIG_UPDATED_FILE=$EXAMPLE_DIR/http_example_bad_healthcheck.aurora
 TEST_EPHEMERAL_DAEMON_WITH_FINAL_JOB=ephemeral_daemon_with_final
 TEST_EPHEMERAL_DAEMON_WITH_FINAL_CONFIG_FILE=$TEST_ROOT/ephemeral_daemon_with_final.aurora
+TEST_DAEMONIZING_PROCESS_JOB=daemonize
+TEST_DAEMONIZING_PROCESS_CONFIG_FILE=$TEST_ROOT/test_daemonizing_process.aurora
 
 BASE_ARGS=(
   $TEST_CLUSTER
@@ -448,7 +537,11 @@ BASE_ARGS=(
 
 TEST_JOB_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB")
 
+TEST_JOB_WATCH_SECS_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_WATCH_SECS")
+
 TEST_JOB_REVOCABLE_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_REVOCABLE")
+
+TEST_JOB_GPU_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_GPU")
 
 TEST_JOB_DOCKER_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_DOCKER")
 
@@ -462,26 +555,41 @@ TEST_JOB_EPHEMERAL_DAEMON_WITH_FINAL_ARGS=(
   $TEST_EPHEMERAL_DAEMON_WITH_FINAL_CONFIG_FILE
 )
 
+TEST_DAEMONIZING_PROCESS_ARGS=(
+  $TEST_CLUSTER
+  $TEST_ROLE
+  $TEST_ENV
+  $TEST_DAEMONIZING_PROCESS_JOB
+  $TEST_DAEMONIZING_PROCESS_CONFIG_FILE
+)
+
 trap collect_result EXIT
 
 aurorabuild all
+setup_ssh
+setup_docker_registry
+
 test_version
 test_http_example "${TEST_JOB_ARGS[@]}"
+test_http_example "${TEST_JOB_WATCH_SECS_ARGS[@]}"
 test_health_check
 
-test_http_revocable_example "${TEST_JOB_REVOCABLE_ARGS[@]}"
+test_http_example_basic "${TEST_JOB_REVOCABLE_ARGS[@]}"
 
-# build the test docker image
-sudo docker build -t http_example ${TEST_ROOT}
+test_http_example_basic "${TEST_JOB_GPU_ARGS[@]}"
+
 test_http_example "${TEST_JOB_DOCKER_ARGS[@]}"
 
-# This test relies on the docker image having been built above.
-test_appc
+setup_image_stores
+test_appc_unified
+test_docker_unified
 
 test_admin "${TEST_ADMIN_ARGS[@]}"
 test_basic_auth_unauthenticated  "${TEST_JOB_ARGS[@]}"
 
 test_ephemeral_daemon_with_final "${TEST_JOB_EPHEMERAL_DAEMON_WITH_FINAL_ARGS[@]}"
+
+test_daemonizing_process "${TEST_DAEMONIZING_PROCESS_ARGS[@]}"
 
 /vagrant/src/test/sh/org/apache/aurora/e2e/test_kerberos_end_to_end.sh
 /vagrant/src/test/sh/org/apache/aurora/e2e/test_bypass_leader_redirect_end_to_end.sh

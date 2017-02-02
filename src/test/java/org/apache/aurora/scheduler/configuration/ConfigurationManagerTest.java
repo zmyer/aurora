@@ -20,22 +20,30 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
 
+import org.apache.aurora.gen.AppcImage;
 import org.apache.aurora.gen.Constraint;
 import org.apache.aurora.gen.Container;
 import org.apache.aurora.gen.CronCollisionPolicy;
 import org.apache.aurora.gen.DockerParameter;
 import org.apache.aurora.gen.ExecutorConfig;
 import org.apache.aurora.gen.Identity;
+import org.apache.aurora.gen.Image;
 import org.apache.aurora.gen.JobConfiguration;
 import org.apache.aurora.gen.JobKey;
 import org.apache.aurora.gen.LimitConstraint;
+import org.apache.aurora.gen.MesosContainer;
+import org.apache.aurora.gen.MesosFetcherURI;
+import org.apache.aurora.gen.Mode;
 import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskConstraint;
 import org.apache.aurora.gen.ValueConstraint;
+import org.apache.aurora.gen.Volume;
+import org.apache.aurora.gen.apiConstants;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager.ConfigurationManagerSettings;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager.TaskDescriptionException;
+import org.apache.aurora.scheduler.mesos.TestExecutorSettings;
 import org.apache.aurora.scheduler.storage.entities.IDockerParameter;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.junit.Rule;
@@ -45,11 +53,13 @@ import org.junit.rules.ExpectedException;
 import static org.apache.aurora.gen.Resource.diskMb;
 import static org.apache.aurora.gen.Resource.namedPort;
 import static org.apache.aurora.gen.Resource.numCpus;
+import static org.apache.aurora.gen.Resource.numGpus;
 import static org.apache.aurora.gen.Resource.ramMb;
 import static org.apache.aurora.gen.test.testConstants.INVALID_IDENTIFIERS;
 import static org.apache.aurora.gen.test.testConstants.VALID_IDENTIFIERS;
 import static org.apache.aurora.scheduler.base.UserProvidedStrings.isGoodIdentifier;
 import static org.apache.aurora.scheduler.configuration.ConfigurationManager.DEDICATED_ATTRIBUTE;
+import static org.apache.aurora.scheduler.configuration.ConfigurationManager.NO_CONTAINER_VOLUMES;
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -76,7 +86,7 @@ public class ConfigurationManagerTest {
               .setJob(JOB_KEY)
               .setIsService(false)
               .setTaskLinks(ImmutableMap.of())
-              .setExecutorConfig(new ExecutorConfig("aurora", "config"))
+              .setExecutorConfig(new ExecutorConfig(apiConstants.AURORA_EXECUTOR_NAME, "config"))
               .setRequestedPorts(ImmutableSet.of())
               .setPriority(0)
               .setOwner(null)
@@ -113,18 +123,28 @@ public class ConfigurationManagerTest {
 
   private static final ConfigurationManager CONFIGURATION_MANAGER = new ConfigurationManager(
       new ConfigurationManagerSettings(
-      ALL_CONTAINER_TYPES,
-      false,
-      ImmutableMultimap.of(),
-      true),
-      TaskTestUtil.DEV_TIER_MANAGER);
+          ALL_CONTAINER_TYPES,
+          false,
+          ImmutableMultimap.of(),
+          true,
+          false,
+          true,
+          false),
+      TaskTestUtil.TIER_MANAGER,
+      TaskTestUtil.THRIFT_BACKFILL,
+      TestExecutorSettings.THERMOS_EXECUTOR);
   private static final ConfigurationManager DOCKER_CONFIGURATION_MANAGER = new ConfigurationManager(
       new ConfigurationManagerSettings(
-        ALL_CONTAINER_TYPES,
-        true,
-        ImmutableMultimap.of("foo", "bar"),
-        false),
-      TaskTestUtil.DEV_TIER_MANAGER);
+          ALL_CONTAINER_TYPES,
+          true,
+          ImmutableMultimap.of("foo", "bar"),
+          false,
+          true,
+          true,
+          true),
+      TaskTestUtil.TIER_MANAGER,
+      TaskTestUtil.THRIFT_BACKFILL,
+      TestExecutorSettings.THERMOS_EXECUTOR);
 
   @Test
   public void testIsGoodIdentifier() {
@@ -269,6 +289,62 @@ public class ConfigurationManagerTest {
     builder.addToResources(namedPort("thrift"));
 
     DOCKER_CONFIGURATION_MANAGER.validateAndPopulate(ITaskConfig.build(builder));
+  }
+
+  @Test
+  public void testGpuResourcesNotAllowed() throws Exception {
+    TaskConfig builder = CONFIG_WITH_CONTAINER.newBuilder();
+    builder.addToResources(numGpus(2));
+
+    expectTaskDescriptionException("GPU resource support is disabled in this cluster.");
+    new ConfigurationManager(
+        new ConfigurationManagerSettings(
+            ALL_CONTAINER_TYPES,
+            true,
+            ImmutableMultimap.of("foo", "bar"),
+            false,
+            false,
+            false,
+            false),
+        TaskTestUtil.TIER_MANAGER,
+        TaskTestUtil.THRIFT_BACKFILL,
+        TestExecutorSettings.THERMOS_EXECUTOR).validateAndPopulate(ITaskConfig.build(builder));
+  }
+
+  @Test
+  public void testMesosFetcherDisabled() throws Exception {
+    TaskConfig builder = CONFIG_WITH_CONTAINER.newBuilder();
+    builder.setMesosFetcherUris(
+        ImmutableSet.of(
+            new MesosFetcherURI("pathA").setExtract(true).setCache(true),
+            new MesosFetcherURI("pathB").setExtract(true).setCache(true)));
+
+    expectTaskDescriptionException(ConfigurationManager.MESOS_FETCHER_DISABLED);
+    new ConfigurationManager(
+            new ConfigurationManagerSettings(
+                    ALL_CONTAINER_TYPES,
+                    true,
+                    ImmutableMultimap.of("foo", "bar"),
+                    false,
+                    false,
+                    false,
+                    false),
+            TaskTestUtil.TIER_MANAGER,
+            TaskTestUtil.THRIFT_BACKFILL,
+            TestExecutorSettings.THERMOS_EXECUTOR).validateAndPopulate(ITaskConfig.build(builder));
+  }
+
+  @Test
+  public void testContainerVolumesDisabled() throws Exception {
+    TaskConfig builder = CONFIG_WITH_CONTAINER.newBuilder();
+    MesosContainer container = new MesosContainer()
+        .setImage(Image.appc(new AppcImage("name", "id")))
+        .setVolumes(ImmutableList.of(new Volume("container", "host", Mode.RO)));
+    builder.setContainer(Container.mesos(container));
+
+    expectTaskDescriptionException(NO_CONTAINER_VOLUMES);
+
+    CONFIGURATION_MANAGER.validateAndPopulate(ITaskConfig.build(builder));
   }
 
   @Test

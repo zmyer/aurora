@@ -51,13 +51,16 @@ import org.apache.aurora.gen.JobUpdateInstructions;
 import org.apache.aurora.gen.JobUpdateKey;
 import org.apache.aurora.gen.JobUpdatePulseStatus;
 import org.apache.aurora.gen.JobUpdateSettings;
+import org.apache.aurora.gen.JobUpdateState;
 import org.apache.aurora.gen.JobUpdateStatus;
 import org.apache.aurora.gen.JobUpdateSummary;
 import org.apache.aurora.gen.LockKey;
+import org.apache.aurora.gen.Metadata;
 import org.apache.aurora.gen.Range;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskConfig;
+import org.apache.aurora.scheduler.SchedulerModule.TaskEventBatchWorker;
 import org.apache.aurora.scheduler.TaskIdGenerator;
 import org.apache.aurora.scheduler.TaskIdGenerator.TaskIdGeneratorImpl;
 import org.apache.aurora.scheduler.base.JobKeys;
@@ -123,6 +126,7 @@ import static org.apache.aurora.gen.ScheduleStatus.KILLED;
 import static org.apache.aurora.gen.ScheduleStatus.RUNNING;
 import static org.apache.aurora.gen.ScheduleStatus.STARTING;
 import static org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
+import static org.apache.aurora.scheduler.testing.BatchWorkerUtil.expectBatchExecute;
 import static org.apache.aurora.scheduler.updater.UpdateFactory.UpdateFactoryImpl.expandInstanceIds;
 import static org.easymock.EasyMock.expectLastCall;
 import static org.junit.Assert.assertEquals;
@@ -142,6 +146,8 @@ public class JobUpdaterIT extends EasyMockTest {
       setExecutorData(TaskTestUtil.makeConfig(JOB), "olddata");
   private static final ITaskConfig NEW_CONFIG = setExecutorData(OLD_CONFIG, "newdata");
   private static final long PULSE_TIMEOUT_MS = 10000;
+  private static final ImmutableSet<Metadata> METADATA = ImmutableSet.of(
+      new Metadata("k1", "v1"), new Metadata("k2", "v2"));
 
   private FakeScheduledExecutor clock;
   private JobUpdateController updater;
@@ -160,7 +166,7 @@ public class JobUpdaterIT extends EasyMockTest {
   }
 
   @Before
-  public void setUp() {
+  public void setUp() throws Exception {
     // Avoid console spam due to stats registered multiple times.
     Stats.flush();
     ScheduledExecutorService executor = createMock(ScheduledExecutorService.class);
@@ -168,6 +174,7 @@ public class JobUpdaterIT extends EasyMockTest {
     driver = createMock(Driver.class);
     shutdownCommand = createMock(Command.class);
     eventBus = new EventBus();
+    TaskEventBatchWorker batchWorker = createMock(TaskEventBatchWorker.class);
 
     Injector injector = Guice.createInjector(
         new UpdaterModule(executor),
@@ -191,6 +198,7 @@ public class JobUpdaterIT extends EasyMockTest {
             bind(LockManager.class).to(LockManagerImpl.class);
             bind(UUIDGenerator.class).to(UUIDGeneratorImpl.class);
             bind(Lifecycle.class).toInstance(new Lifecycle(shutdownCommand));
+            bind(TaskEventBatchWorker.class).toInstance(batchWorker);
           }
         });
     updater = injector.getInstance(JobUpdateController.class);
@@ -200,6 +208,7 @@ public class JobUpdaterIT extends EasyMockTest {
     stateManager = injector.getInstance(StateManager.class);
     eventBus.register(injector.getInstance(JobUpdateEventSubscriber.class));
     subscriber = injector.getInstance(JobUpdateEventSubscriber.class);
+    expectBatchExecute(batchWorker, storage, control).anyTimes();
   }
 
   @After
@@ -263,6 +272,11 @@ public class JobUpdaterIT extends EasyMockTest {
         storeProvider -> storeProvider.getJobUpdateStore().fetchJobUpdateDetails(UPDATE_ID).get());
   }
 
+  private IJobUpdateDetails getDetails(IJobUpdateKey key) {
+    return storage.read(
+        storeProvider -> storeProvider.getJobUpdateStore().fetchJobUpdateDetails(key).get());
+  }
+
   private void assertLatestUpdateMessage(String expected) {
     IJobUpdateDetails details = getDetails();
     assertEquals(expected, Iterables.getLast(details.getUpdateEvents()).getMessage());
@@ -272,7 +286,15 @@ public class JobUpdaterIT extends EasyMockTest {
       JobUpdateStatus expected,
       Multimap<Integer, JobUpdateAction> expectedActions) {
 
-    IJobUpdateDetails details = getDetails();
+    assertStateUpdate(UPDATE_ID, expected, expectedActions);
+  }
+
+  private void assertStateUpdate(
+      IJobUpdateKey key,
+      JobUpdateStatus expected,
+      Multimap<Integer, JobUpdateAction> expectedActions) {
+
+    IJobUpdateDetails details = getDetails(key);
     Iterable<IJobInstanceUpdateEvent> orderedEvents =
         EVENT_ORDER.sortedCopy(details.getInstanceEvents());
     Multimap<Integer, IJobInstanceUpdateEvent> eventsByInstance =
@@ -291,6 +313,11 @@ public class JobUpdaterIT extends EasyMockTest {
   private void insertPendingTasks(ITaskConfig task, Set<Integer> instanceIds) {
     storage.write((NoResult.Quiet) storeProvider ->
         stateManager.insertPendingTasks(storeProvider, task, instanceIds));
+  }
+
+  private ILock insertInProgressUpdate(IJobUpdate update) {
+    return storage.write(
+        storeProvider -> saveJobUpdate(storeProvider.getJobUpdateStore(), update, ROLLING_FORWARD));
   }
 
   private void insertInitialTasks(IJobUpdate update) {
@@ -1049,7 +1076,7 @@ public class JobUpdaterIT extends EasyMockTest {
     expectInvalid(update);
 
     update = makeJobUpdate().newBuilder();
-    update.getInstructions().getSettings().setMinWaitInInstanceRunningMs(0);
+    update.getInstructions().getSettings().setMinWaitInInstanceRunningMs(-1);
     expectInvalid(update);
   }
 
@@ -1365,15 +1392,236 @@ public class JobUpdaterIT extends EasyMockTest {
     updater.resume(UPDATE_ID, AUDIT);
   }
 
-  private static IJobUpdateSummary makeUpdateSummary() {
+  @Test
+  public void testFailToRollbackCompletedUpdate() throws Exception {
+    expectTaskKilled().times(3);
+
+    control.replay();
+
+    JobUpdate builder = makeJobUpdate(makeInstanceConfig(0, 2, OLD_CONFIG)).newBuilder();
+    builder.getInstructions().getSettings()
+        .setWaitForBatchCompletion(true)
+        .setUpdateGroupSize(2);
+    IJobUpdate update = IJobUpdate.build(builder);
+    insertInitialTasks(update);
+
+    changeState(JOB, 0, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 1, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 2, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+
+    ImmutableMultimap.Builder<Integer, JobUpdateAction> actions = ImmutableMultimap.builder();
+
+    // Instances 0 and 1 are updated.
+    updater.start(update, AUDIT);
+    actions.putAll(0, INSTANCE_UPDATING)
+        .putAll(1, INSTANCE_UPDATING);
+    assertState(ROLLING_FORWARD, actions.build());
+    changeState(JOB, 1, FINISHED, ASSIGNED, STARTING, RUNNING);
+    clock.advance(Amount.of(WATCH_TIMEOUT.getValue() / 2, Time.MILLISECONDS));
+    changeState(JOB, 0, FINISHED, ASSIGNED, STARTING, RUNNING);
+    clock.advance(Amount.of(WATCH_TIMEOUT.getValue() / 2, Time.MILLISECONDS));
+
+    // Instance 1 finished first, but update does not yet proceed until 0 finishes.
+    actions.putAll(1, INSTANCE_UPDATED);
+    assertState(ROLLING_FORWARD, actions.build());
+    clock.advance(WATCH_TIMEOUT);
+    actions.putAll(0, INSTANCE_UPDATED);
+
+    // Instance 2 is updated.
+    changeState(JOB, 2, FINISHED, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+    actions.putAll(2, INSTANCE_UPDATING, INSTANCE_UPDATED);
+    assertState(ROLLED_FORWARD, actions.build());
+
+    assertJobState(
+        JOB,
+        ImmutableMap.of(0, NEW_CONFIG, 1, NEW_CONFIG, 2, NEW_CONFIG));
+
+    try {
+      updater.rollback(UPDATE_ID, AUDIT);
+      fail();
+    } catch (UpdateStateException e) {
+      // Expected.
+    }
+  }
+
+  @Test
+  public void testRollbackDuringUpgrade() throws Exception {
+    expectTaskKilled().times(5);
+
+    control.replay();
+
+    JobUpdate builder = makeJobUpdate(makeInstanceConfig(0, 2, OLD_CONFIG)).newBuilder();
+    builder.getInstructions().getSettings()
+        .setWaitForBatchCompletion(true)
+        .setUpdateGroupSize(2);
+    IJobUpdate update = IJobUpdate.build(builder);
+    insertInitialTasks(update);
+
+    changeState(JOB, 0, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 1, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 2, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+
+    ImmutableMultimap.Builder<Integer, JobUpdateAction> actions = ImmutableMultimap.builder();
+
+    // Instances 0 and 1 are updated.
+    updater.start(update, AUDIT);
+    actions.putAll(0, INSTANCE_UPDATING)
+        .putAll(1, INSTANCE_UPDATING);
+    assertState(ROLLING_FORWARD, actions.build());
+    changeState(JOB, 1, FINISHED, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 0, FINISHED, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+
+    actions.putAll(0, INSTANCE_UPDATED)
+        .putAll(1, INSTANCE_UPDATED)
+        .putAll(2, INSTANCE_UPDATING);
+    assertState(ROLLING_FORWARD, actions.build());
+    clock.advance(WATCH_TIMEOUT);
+
+    updater.rollback(UPDATE_ID, AUDIT);
+
+    actions.putAll(1, INSTANCE_ROLLING_BACK);
+    actions.putAll(2, INSTANCE_ROLLING_BACK);
+    changeState(JOB, 1, KILLED);
+    changeState(JOB, 2, KILLED);
+    clock.advance(WATCH_TIMEOUT);
+
+    assertState(ROLLING_BACK, actions.build());
+    clock.advance(WATCH_TIMEOUT);
+
+    changeState(JOB, 2, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 1, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+
+    actions.putAll(2, INSTANCE_ROLLED_BACK)
+        .putAll(1, INSTANCE_ROLLED_BACK);
+    changeState(JOB, 0, KILLED);
+    actions.putAll(0, INSTANCE_ROLLING_BACK);
+    clock.advance(WATCH_TIMEOUT);
+
+    assertState(ROLLING_BACK, actions.build());
+
+    changeState(JOB, 0, ASSIGNED, STARTING, RUNNING);
+    actions.putAll(0, INSTANCE_ROLLED_BACK);
+    clock.advance(WATCH_TIMEOUT);
+
+    assertState(ROLLED_BACK, actions.build());
+
+    assertJobState(
+        JOB,
+        ImmutableMap.of(0, OLD_CONFIG, 1, OLD_CONFIG, 2, OLD_CONFIG));
+  }
+
+  @Test
+  public void testRollbackCoordinatedUpdate() throws Exception {
+    control.replay();
+
+    JobUpdate builder = makeJobUpdate(
+        // No-op - task is already matching the new config.
+        makeInstanceConfig(0, 0, NEW_CONFIG),
+        // Tasks needing update.
+        makeInstanceConfig(1, 2, OLD_CONFIG)).newBuilder();
+
+    builder.getInstructions().getSettings().setBlockIfNoPulsesAfterMs((int) PULSE_TIMEOUT_MS);
+    insertInitialTasks(IJobUpdate.build(builder));
+
+    changeState(JOB, 0, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 1, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 2, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+
+    ImmutableMultimap.Builder<Integer, JobUpdateAction> actions = ImmutableMultimap.builder();
+    updater.start(IJobUpdate.build(builder), AUDIT);
+
+    // The update is blocked initially waiting for a pulse.
+    assertState(ROLL_FORWARD_AWAITING_PULSE, actions.build());
+
+    updater.rollback(UPDATE_ID, AUDIT);
+
+    clock.advance(WATCH_TIMEOUT);
+    assertState(ROLLED_BACK, actions.build());
+  }
+
+  @Test
+  public void testRollbackPausedForwardUpdate() throws Exception {
+    expectTaskKilled().times(2);
+
+    control.replay();
+
+    JobUpdate builder = makeJobUpdate(
+        // No-op - task is already matching the new config.
+        makeInstanceConfig(0, 0, NEW_CONFIG),
+        // Tasks needing update.
+        makeInstanceConfig(1, 2, OLD_CONFIG)).newBuilder();
+
+    insertInitialTasks(IJobUpdate.build(builder));
+
+    changeState(JOB, 0, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 1, ASSIGNED, STARTING, RUNNING);
+    changeState(JOB, 2, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+
+    ImmutableMultimap.Builder<Integer, JobUpdateAction> actions = ImmutableMultimap.builder();
+    updater.start(IJobUpdate.build(builder), AUDIT);
+
+    actions.putAll(1, INSTANCE_UPDATING);
+    assertState(ROLLING_FORWARD, actions.build());
+    clock.advance(WATCH_TIMEOUT);
+    changeState(JOB, 1, KILLED, ASSIGNED, STARTING, RUNNING);
+
+    updater.pause(UPDATE_ID, AUDIT);
+    assertState(ROLL_FORWARD_PAUSED, actions.build());
+
+    updater.rollback(UPDATE_ID, AUDIT);
+
+    actions.putAll(1, INSTANCE_ROLLING_BACK);
+    clock.advance(WATCH_TIMEOUT);
+    assertState(ROLLING_BACK, actions.build());
+
+    actions.putAll(1, INSTANCE_ROLLED_BACK);
+    changeState(JOB, 1, KILLED, ASSIGNED, STARTING, RUNNING);
+    clock.advance(WATCH_TIMEOUT);
+    assertState(ROLLED_BACK, actions.build());
+
+    assertJobState(
+        JOB,
+        ImmutableMap.of(0, NEW_CONFIG, 1, OLD_CONFIG, 2, OLD_CONFIG));
+  }
+
+  @Test
+  public void testInProgressUpdate() throws Exception {
+    control.replay();
+
+    IJobUpdate inProgress = makeJobUpdate();
+    ILock lock = insertInProgressUpdate(inProgress);
+
+    IJobUpdate anotherUpdate = makeJobUpdate();
+    try {
+      updater.start(anotherUpdate, AUDIT);
+      fail("update cannot start when another is in-progress");
+    } catch (UpdateInProgressException e) {
+      // Expected.
+      assertEquals(
+          inProgress.getSummary().newBuilder().setState(new JobUpdateState(ROLLING_FORWARD, 0, 0)),
+          e.getInProgressUpdateSummary().newBuilder());
+      assertEquals(ImmutableList.of(lock), ImmutableList.copyOf(lockManager.getLocks()));
+    } finally {
+      lockManager.releaseLock(lock);
+    }
+  }
+
+  private static IJobUpdateSummary makeUpdateSummary(IJobUpdateKey key) {
     return IJobUpdateSummary.build(new JobUpdateSummary()
         .setUser("user")
-        .setKey(UPDATE_ID.newBuilder()));
+        .setKey(key.newBuilder()));
   }
 
   private static IJobUpdate makeJobUpdate(IInstanceTaskConfig... configs) {
     JobUpdate builder = new JobUpdate()
-        .setSummary(makeUpdateSummary().newBuilder())
+        .setSummary(makeUpdateSummary(UPDATE_ID).newBuilder().setMetadata(METADATA))
         .setInstructions(new JobUpdateInstructions()
             .setDesiredState(new InstanceTaskConfig()
                 .setTask(NEW_CONFIG.newBuilder())

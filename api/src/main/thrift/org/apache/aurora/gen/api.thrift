@@ -142,6 +142,16 @@ struct InstanceKey {
   2: i32 instanceId
 }
 
+/** URI which mirrors CommandInfo.URI in the Mesos Protobuf */
+struct MesosFetcherURI {
+  /** Where to get the resource from */
+  1: string value
+  /** Extract compressed archive after downloading */
+  2: optional bool extract
+  /** Cache value using Mesos Fetcher caching mechanism **/
+  3: optional bool cache
+}
+
 struct ExecutorConfig {
   /** Name identifying the Executor. */
   1: string name
@@ -193,6 +203,8 @@ union Image {
 struct MesosContainer {
   /** the optional filesystem image to use when launching this task. */
   1: optional Image image
+  /** the optional list of volumes to mount into the task. */
+  2: optional list<Volume> volumes
 }
 
 /** Describes a parameter passed to docker cli */
@@ -223,21 +235,26 @@ union Resource {
   2: i64 ramMb
   3: i64 diskMb
   4: string namedPort
+  5: i64 numGpus
 }
 
 /** Description of the tasks contained within a job. */
 struct TaskConfig {
  /** Job task belongs to. */
  28: JobKey job
- // TODO(maxim): Remove in 0.7.0. (AURORA-749)
+ // TODO(maxim): Deprecated. See AURORA-749.
  /** contains the role component of JobKey */
  17: Identity owner
   7: bool isService
+  // TODO(maxim): Deprecated. See AURORA-1707.
   8: double numCpus
+  // TODO(maxim): Deprecated. See AURORA-1707.
   9: i64 ramMb
+  // TODO(maxim): Deprecated. See AURORA-1707.
  10: i64 diskMb
  11: i32 priority
  13: i32 maxTaskFailures
+ // TODO(mnurolahzade): Deprecated. See AURORA-1708.
  /** Whether this is a production task, which can preempt. */
  18: optional bool production
  /** Task tier type. */
@@ -248,6 +265,8 @@ struct TaskConfig {
  20: set<Constraint> constraints
  /** a list of named ports this task requests */
  21: set<string> requestedPorts
+ /** Resources to retrieve with Mesos Fetcher */
+ 33: optional set<MesosFetcherURI> mesosFetcherUris
  /**
   * Custom links to include when displaying this task on the scheduler dashboard. Keys are anchor
   * text, values are URLs. Wildcards are supported for dynamic link crafting based on host, ports,
@@ -267,10 +286,13 @@ struct TaskConfig {
 }
 
 struct ResourceAggregate {
+  // TODO(maxim): Deprecated. See AURORA-1707.
   /** Number of CPU cores allotted. */
   1: double numCpus
+  // TODO(maxim): Deprecated. See AURORA-1707.
   /** Megabytes of RAM allotted. */
   2: i64 ramMb
+  // TODO(maxim): Deprecated. See AURORA-1707.
   /** Megabytes of disk space allotted. */
   3: i64 diskMb
   /** Aggregated resource values. */
@@ -299,13 +321,13 @@ struct JobConfiguration {
    * used to construct it server-side.
    */
   9: JobKey key
-  // TODO(maxim): Remove in 0.7.0. (AURORA-749)
+  // TODO(maxim): Deprecated. See AURORA-749.
   /** Owner of this job. */
   7: Identity owner
   /**
    * If present, the job will be handled as a cron job with this crontab-syntax schedule.
    */
-  4: string cronSchedule
+  4: optional string cronSchedule
   /** Collision policy to use when handling overlapping cron runs.  Default is KILL_EXISTING. */
   5: CronCollisionPolicy cronCollisionPolicy
   /** Task configuration for this job. */
@@ -750,6 +772,9 @@ struct JobUpdateSummary {
 
   /** Current job update state. */
   4: JobUpdateState state
+
+  /** Update metadata supplied by the client. */
+  6: optional set<Metadata> metadata
 }
 
 /** Update configuration and setting details. */
@@ -794,6 +819,9 @@ struct JobUpdateRequest {
 
   /** Update settings and limits. */
   3: JobUpdateSettings settings
+
+  /** Update metadata supplied by the client issuing the JobUpdateRequest. */
+  4: optional set<Metadata> metadata
 }
 
 /**
@@ -867,6 +895,9 @@ struct GetPendingReasonResult {
 struct StartJobUpdateResult {
   /** Unique identifier for the job update. */
   1: JobUpdateKey key
+
+  /** Summary of the update that is in progress for the given JobKey. */
+  2: optional JobUpdateSummary updateSummary
 }
 
 /** Result of the getJobUpdateSummaries call. */
@@ -876,7 +907,9 @@ struct GetJobUpdateSummariesResult {
 
 /** Result of the getJobUpdateDetails call. */
 struct GetJobUpdateDetailsResult {
+  // TODO(zmanji): Remove this once we complete AURORA-1765
   1: JobUpdateDetails details
+  2: list<JobUpdateDetails> detailsList
 }
 
 /** Result of the pulseJobUpdate call. */
@@ -896,6 +929,22 @@ struct GetJobUpdateDiffResult {
 
   /** Instances unchanged by the update. */
   4: set<ConfigGroup> unchanged
+}
+
+/** Tier information. */
+struct TierConfig {
+  /** Name of tier. */
+  1: string name
+  /** Tier attributes. */
+  2: map<string, string> settings
+}
+
+/** Result of the getTierConfigResult call. */
+struct GetTierConfigResult {
+  /** Name of the default tier. */
+  1: string defaultTierName
+  /** Set of tier configurations. */
+  2: set<TierConfig> tiers
 }
 
 /** Information about the scheduler. */
@@ -925,6 +974,7 @@ union Result {
   24: GetJobUpdateDetailsResult getJobUpdateDetailsResult
   25: PulseJobUpdateResult pulseJobUpdateResult
   26: GetJobUpdateDiffResult getJobUpdateDiffResult
+  27: GetTierConfigResult getTierConfigResult
 }
 
 struct ResponseDetail {
@@ -985,10 +1035,14 @@ service ReadOnlyScheduler {
   Response getJobUpdateSummaries(1: JobUpdateQuery jobUpdateQuery)
 
   /** Gets job update details. */
-  Response getJobUpdateDetails(1: JobUpdateKey key)
+  // TODO(zmanji): `key` is deprecated, remove this with AURORA-1765
+  Response getJobUpdateDetails(1: JobUpdateKey key, 2: JobUpdateQuery query)
 
   /** Gets the diff between client (desired) and server (current) job states. */
   Response getJobUpdateDiff(1: JobUpdateRequest request)
+
+  /** Gets tier configurations. */
+  Response getTierConfigs()
 }
 
 service AuroraSchedulerManager extends ReadOnlyScheduler {
@@ -1066,6 +1120,15 @@ service AuroraSchedulerManager extends ReadOnlyScheduler {
       3: string message)
 
   /**
+   * Rollbacks the specified active job update to the initial state.
+   */
+  Response rollbackJobUpdate(
+      /** The update to rollback. */
+      1: JobUpdateKey key,
+      /** A user-specified message to include with the induced job update state change. */
+      2: string message)
+
+  /**
    * Allows progress of the job update in case blockIfNoPulsesAfterMs is specified in
    * JobUpdateSettings. Unblocks progress if the update was previously blocked.
    * Responds with ResponseCode.INVALID_REQUEST in case an unknown update key is specified.
@@ -1096,6 +1159,10 @@ union ConfigRewrite {
 
 struct RewriteConfigsRequest {
   1: list<ConfigRewrite> rewriteCommands
+}
+
+struct ExplicitReconciliationSettings {
+  1: optional i32 batchSize
 }
 
 // It would be great to compose these services rather than extend, but that won't be possible until
@@ -1157,7 +1224,17 @@ service AuroraAdmin extends AuroraSchedulerManager {
    * that the caller take care to provide valid input and alter only necessary fields.
    */
   Response rewriteConfigs(1: RewriteConfigsRequest request)
+
+  /** Tell scheduler to trigger an explicit task reconciliation with the given settings. */
+  Response triggerExplicitTaskReconciliation(1: ExplicitReconciliationSettings settings)
+
+  /** Tell scheduler to trigger an implicit task reconciliation. */
+  Response triggerImplicitTaskReconciliation()
 }
 
 // The name of the header that should be sent to bypass leader redirection in the Scheduler.
 const string BYPASS_LEADER_REDIRECT_HEADER_NAME = 'Bypass-Leader-Redirect'
+
+// The path under which a task's filesystem should be mounted when using images and the Mesos
+// unified containerizer.
+const string TASK_FILESYSTEM_MOUNT_POINT = 'taskfs'

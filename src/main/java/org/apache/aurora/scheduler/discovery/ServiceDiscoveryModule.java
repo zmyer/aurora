@@ -20,7 +20,6 @@ import java.util.List;
 
 import javax.inject.Singleton;
 
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.Files;
 import com.google.common.util.concurrent.AbstractIdleService;
@@ -47,7 +46,7 @@ import static java.util.Objects.requireNonNull;
  */
 public class ServiceDiscoveryModule extends AbstractModule {
 
-  private static final Logger LOG = LoggerFactory.getLogger(CommonsServiceDiscoveryModule.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ServiceDiscoveryModule.class);
 
   private final ZooKeeperConfig zooKeeperConfig;
   private final String discoveryPath;
@@ -145,7 +144,7 @@ public class ServiceDiscoveryModule extends AbstractModule {
       try {
         testServer.startNetwork();
       } catch (IOException | InterruptedException e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
       return ImmutableList.of(
           InetSocketAddress.createUnresolved("localhost", testServer.getPort()));

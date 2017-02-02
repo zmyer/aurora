@@ -38,6 +38,9 @@ from twitter.common.lang import Interface
 from twitter.common.quantity import Amount, Data, Time
 from twitter.common.recordio import ThriftRecordReader, ThriftRecordWriter
 
+from apache.thermos.common.process_util import setup_child_subreaping, wrap_with_mesos_containerizer
+
+from gen.apache.aurora.api.constants import TASK_FILESYSTEM_MOUNT_POINT
 from gen.apache.thermos.ttypes import ProcessState, ProcessStatus, RunnerCkpt
 
 
@@ -147,8 +150,9 @@ class ProcessBase(object):
       if self._rotate_log_backups <= 0:
         raise ValueError('Log backups cannot be less than one.')
 
-  def _log(self, msg):
-    log.debug('[process:%5s=%s]: %s' % (self._pid, self.name(), msg))
+  def _log(self, msg, exc_info=None):
+    log.debug('[process:%5s=%s]: %s' % (self._pid, self.name(), msg),
+            exc_info=exc_info)
 
   def _getpwuid(self):
     """Returns a tuple of the user (i.e. --user) and current user."""
@@ -308,6 +312,9 @@ class RealPlatform(Platform):
     self._fork = fork
 
   def fork(self):
+    # Before we fork, ensure we become the parent of any processes that escape
+    # the cordinator.
+    setup_child_subreaping()
     pid = self._fork()
     if pid == 0:
       self._sanitize()
@@ -339,11 +346,21 @@ class Process(ProcessBase):
         fork: the fork function to use [default: os.fork]
         chroot: whether or not to chroot into the sandbox [default: False]
         preserve_env: whether or not to preserve env variables for the task [default: False]
+        mesos_containerizer_path: The path to the mesos-containerizer binary to be used for task
+                                  filesystem isolation.
+        container_sandbox: If running in an isolated filesystem, the path within that filesystem
+                           where the sandbox is mounted.
     """
     fork = kw.pop('fork', os.fork)
     self._use_chroot = bool(kw.pop('chroot', False))
     self._rc = None
     self._preserve_env = bool(kw.pop('preserve_env', False))
+    self._mesos_containerizer_path = kw.pop('mesos_containerizer_path', None)
+    self._container_sandbox = kw.pop('container_sandbox', None)
+
+    if self._mesos_containerizer_path is not None and self._container_sandbox is None:
+      raise self.UnspecifiedSandbox('If using mesos-containerizer, container_sandbox must be set.')
+
     kw['platform'] = RealPlatform(fork=fork)
     ProcessBase.__init__(self, *args, **kw)
     if self._use_chroot and self._sandbox is None:
@@ -367,6 +384,15 @@ class Process(ProcessBase):
     os.setgid(gid)
     os.setuid(uid)
 
+  def wrapped_cmdline(self, cwd):
+    cmdline = self.cmdline()
+
+    # If mesos-containerizer is not set, we only need to wrap the cmdline in a bash invocation.
+    if self._mesos_containerizer_path is None:
+      return ['/bin/bash', '-c', cmdline]
+    else:
+      return wrap_with_mesos_containerizer(cmdline, self._user, cwd, self._mesos_containerizer_path)
+
   def execute(self):
     """Perform final initialization and launch target process commandline in a subprocess."""
 
@@ -377,15 +403,29 @@ class Process(ProcessBase):
     os.setsid()
     if self._use_chroot:
       self._chroot()
-    self._setuid()
+
+    # If the mesos containerizer path is set, then this process will be launched from within an
+    # isolated filesystem image by the mesos-containerizer executable. This executable needs to be
+    # run as root so that it can properly set up the filesystem as such we'll skip calling setuid at
+    # this point. We'll instead setuid after the process has been forked (mesos-containerizer itself
+    # ensures the forked process is run as the correct user).
+    taskfs_isolated = self._mesos_containerizer_path is not None
+    if not taskfs_isolated:
+      self._setuid()
 
     # start process
     start_time = self._platform.clock().time()
 
     if not self._sandbox:
-      sandbox = os.getcwd()
+      cwd = subprocess_cwd = sandbox = os.getcwd()
     else:
-      sandbox = self._sandbox if not self._use_chroot else '/'
+      if self._use_chroot:
+        cwd = subprocess_cwd = sandbox = '/'
+      elif taskfs_isolated:
+        cwd = homedir = sandbox = self._container_sandbox
+        subprocess_cwd = self._sandbox
+      else:
+        cwd = subprocess_cwd = homedir = sandbox = self._sandbox
 
     thermos_profile = os.path.join(sandbox, self.RCFILE)
 
@@ -395,43 +435,52 @@ class Process(ProcessBase):
       env = {}
 
     env.update({
-      'HOME': homedir if self._use_chroot else sandbox,
+      'HOME': homedir,
       'LOGNAME': username,
       'USER': username,
       'PATH': os.environ['PATH']
     })
 
-    if os.path.exists(thermos_profile):
+    wrapped_cmdline = self.wrapped_cmdline(cwd)
+    log.debug('Wrapped cmdline: %s' % wrapped_cmdline)
+
+    real_thermos_profile_path = os.path.join(
+        os.environ['MESOS_DIRECTORY'],
+        TASK_FILESYSTEM_MOUNT_POINT,
+        thermos_profile.lstrip('/')) if taskfs_isolated else thermos_profile
+
+    if os.path.exists(real_thermos_profile_path):
       env.update(BASH_ENV=thermos_profile)
 
+    log.debug('ENV is: %s' % env)
     subprocess_args = {
-      'args': ["/bin/bash", "-c", self.cmdline()],
+      'args': wrapped_cmdline,
       'close_fds': self.FD_CLOEXEC,
-      'cwd': sandbox,
+      'cwd': subprocess_cwd,
       'env': env,
       'pathspec': self._pathspec
     }
 
-    log_destination_resolver = LogDestinationResolver(self._pathspec,
-                                                       destination=self._logger_destination,
-                                                       mode=self._logger_mode,
-                                                       rotate_log_size=self._rotate_log_size,
-                                                       rotate_log_backups=self._rotate_log_backups)
+    log_destination_resolver = LogDestinationResolver(
+        self._pathspec,
+        destination=self._logger_destination,
+        mode=self._logger_mode,
+        rotate_log_size=self._rotate_log_size,
+        rotate_log_backups=self._rotate_log_backups)
     stdout, stderr, handlers_are_files = log_destination_resolver.get_handlers()
     if handlers_are_files:
-      executor = SubprocessExecutor(stdout=stdout,
-                                    stderr=stderr,
-                                    **subprocess_args)
+      executor = SubprocessExecutor(stdout=stdout, stderr=stderr, **subprocess_args)
     else:
-      executor = PipedSubprocessExecutor(stdout=stdout,
-                                       stderr=stderr,
-                                       **subprocess_args)
+      executor = PipedSubprocessExecutor(stdout=stdout, stderr=stderr, **subprocess_args)
 
     pid = executor.start()
 
-    self._write_process_update(state=ProcessState.RUNNING,
-                               pid=pid,
-                               start_time=start_time)
+    # Now that we've forked the process, if the task's filesystem is isolated it's now safe to
+    # setuid.
+    if taskfs_isolated:
+      self._setuid()
+
+    self._write_process_update(state=ProcessState.RUNNING, pid=pid, start_time=start_time)
 
     rc = executor.wait()
 
@@ -443,9 +492,7 @@ class Process(ProcessBase):
     else:
       state = ProcessState.FAILED
 
-    self._write_process_update(state=state,
-                               return_code=rc,
-                               stop_time=self._platform.clock().time())
+    self._write_process_update(state=state, return_code=rc, stop_time=self._platform.clock().time())
     self._rc = rc
 
   def finish(self):

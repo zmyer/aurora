@@ -31,6 +31,8 @@ import org.apache.aurora.scheduler.events.PubsubEventModule;
 import org.apache.aurora.scheduler.preemptor.BiCache;
 import org.apache.aurora.scheduler.scheduling.RescheduleCalculator.RescheduleCalculatorImpl;
 
+import static org.apache.aurora.scheduler.SchedulerServicesModule.addSchedulerActiveServiceBinding;
+
 /**
  * Binding module for task scheduling logic.
  */
@@ -78,10 +80,20 @@ public class SchedulingModule extends AbstractModule {
   private static final Arg<Amount<Long, Time>> MAX_SCHEDULE_PENALTY =
       Arg.create(Amount.of(1L, Time.MINUTES));
 
-  @CmdLine(name = "offer_reservation_duration", help = "Time to reserve a slave's offers while "
+  @CmdLine(name = "offer_reservation_duration", help = "Time to reserve a agent's offers while "
       + "trying to satisfy a task preempting another.")
   private static final Arg<Amount<Long, Time>> RESERVATION_DURATION =
       Arg.create(Amount.of(3L, Time.MINUTES));
+
+  @Positive
+  @CmdLine(name = "scheduling_max_batch_size",
+      help = "The maximum number of scheduling attempts that can be processed in a batch.")
+  private static final Arg<Integer> SCHEDULING_MAX_BATCH_SIZE = Arg.create(3);
+
+  @Positive
+  @CmdLine(name = "max_tasks_per_schedule_attempt",
+      help = "The maximum number of tasks to pick in a single scheduling attempt.")
+  private static final Arg<Integer> MAX_TASKS_PER_SCHEDULE_ATTEMPT = Arg.create(5);
 
   @Override
   protected void configure() {
@@ -93,7 +105,8 @@ public class SchedulingModule extends AbstractModule {
             new TruncatedBinaryBackoff(
                 INITIAL_SCHEDULE_PENALTY.get(),
                 MAX_SCHEDULE_PENALTY.get()),
-            RateLimiter.create(MAX_SCHEDULE_ATTEMPTS_PER_SEC.get())));
+            RateLimiter.create(MAX_SCHEDULE_ATTEMPTS_PER_SEC.get()),
+            MAX_TASKS_PER_SCHEDULE_ATTEMPT.get()));
 
         bind(RescheduleCalculatorImpl.RescheduleCalculatorSettings.class)
             .toInstance(new RescheduleCalculatorImpl.RescheduleCalculatorSettings(
@@ -108,6 +121,12 @@ public class SchedulingModule extends AbstractModule {
       }
     });
     PubsubEventModule.bindSubscriber(binder(), TaskGroups.class);
+
+    bind(new TypeLiteral<Integer>() { })
+        .annotatedWith(TaskGroups.SchedulingMaxBatchSize.class)
+        .toInstance(SCHEDULING_MAX_BATCH_SIZE.get());
+    bind(TaskGroups.TaskGroupBatchWorker.class).in(Singleton.class);
+    addSchedulerActiveServiceBinding(binder()).to(TaskGroups.TaskGroupBatchWorker.class);
 
     install(new PrivateModule() {
       @Override

@@ -18,6 +18,7 @@ import datetime
 import json
 import textwrap
 import time
+import uuid
 from collections import namedtuple
 
 from apache.aurora.client.api import AuroraClientAPI
@@ -50,7 +51,12 @@ from apache.aurora.client.cli.options import (
 from apache.aurora.common.aurora_job_key import AuroraJobKey
 
 from gen.apache.aurora.api.constants import ACTIVE_JOB_UPDATE_STATES
-from gen.apache.aurora.api.ttypes import JobUpdateAction, JobUpdateKey, JobUpdateStatus
+from gen.apache.aurora.api.ttypes import (
+    JobUpdateAction,
+    JobUpdateKey,
+    JobUpdateStatus,
+    ResponseCode
+)
 
 
 class UpdateController(object):
@@ -76,11 +82,18 @@ class UpdateController(object):
     update_key = self.get_update_key(job_key)
     if update_key is None:
       self.context.print_err("No active update found for this job.")
-      return EXIT_INVALID_PARAMETER
+      return EXIT_INVALID_PARAMETER, update_key
     resp = mutate_fn(update_key)
     self.context.log_response_and_raise(resp, err_code=EXIT_API_ERROR, err_msg=error_msg)
     self.context.print_out(success_msg)
-    return EXIT_OK
+    return EXIT_OK, update_key
+
+  def rollback(self, job_key, message):
+    return self._modify_update(
+        job_key,
+        lambda key: self.api.rollback_job_update(key, message),
+        "Failed to rollback update due to error:",
+        "Update rollback has started.")
 
   def pause(self, job_key, message):
     return self._modify_update(
@@ -116,15 +129,20 @@ MESSAGE_OPTION = CommandOption(
     help='Message to include with the update state transition')
 
 
+WAIT_OPTION = lambda help_msg: CommandOption(
+    '--wait',
+    default=False,
+    action='store_true',
+    help=help_msg)
+
+CLIENT_UPDATE_ID = 'org.apache.aurora.client.update_id'
+
+
 class StartUpdate(Verb):
 
   UPDATE_MSG_TEMPLATE = "Job update has started. View your update progress at %s"
 
-  WAIT_OPTION = CommandOption(
-      '--wait',
-      default=False,
-      action='store_true',
-      help='Wait until the update completes')
+  FAILED_TO_START_UPDATE_ERROR_MSG = """Failed to start update due to error:"""
 
   def __init__(self, clock=time):
     self._clock = clock
@@ -143,7 +161,7 @@ class StartUpdate(Verb):
         STRICT_OPTION,
         INSTANCES_SPEC_ARGUMENT,
         CONFIG_ARGUMENT,
-        self.WAIT_OPTION
+        WAIT_OPTION('Wait until the update completes')
     ]
 
   @property
@@ -163,6 +181,7 @@ class StartUpdate(Verb):
     job = context.options.instance_spec.jobkey
     instances = (None if context.options.instance_spec.instance == ALL_INSTANCES else
         context.options.instance_spec.instance)
+    update_id = str(uuid.uuid4())
     config = context.get_job_config(job, context.options.config_file)
     if config.raw().has_cron_schedule():
       raise context.CommandError(
@@ -172,13 +191,16 @@ class StartUpdate(Verb):
     api = context.get_api(config.cluster())
     formatter = DiffFormatter(context, config)
     formatter.show_job_update_diff(instances)
+
     try:
-      resp = api.start_job_update(config, context.options.message, instances)
+      resp = api.start_job_update(config, context.options.message, instances,
+          {CLIENT_UPDATE_ID: update_id})
     except AuroraClientAPI.UpdateConfigError as e:
       raise context.CommandError(EXIT_INVALID_CONFIGURATION, e.message)
 
-    context.log_response_and_raise(resp, err_code=EXIT_API_ERROR,
-        err_msg="Failed to start update due to error:")
+    if not self._is_update_already_in_progress(resp, update_id):
+      context.log_response_and_raise(resp, err_code=EXIT_API_ERROR,
+          err_msg=self.FAILED_TO_START_UPDATE_ERROR_MSG)
 
     if resp.result:
       update_key = resp.result.startJobUpdateResult.key
@@ -189,14 +211,46 @@ class StartUpdate(Verb):
       context.print_out(self.UPDATE_MSG_TEMPLATE % url)
 
       if context.options.wait:
-        return wait_for_update(context, self._clock, api, update_key)
+        return wait_for_update(context, self._clock, api, update_key, update_state_to_err_code)
     else:
       context.print_out(combine_messages(resp))
 
     return EXIT_OK
 
+  def _is_update_already_in_progress(self, resp, update_id):
+    """Returns True if the response indicates that there was an active update
+    already in progress that matches the requested update.
 
-def wait_for_update(context, clock, api, update_key):
+    This can happen, if the client and scheduler have diverged state, where the scheduler
+    already accepted the update, while the client thinks it has not been accepted by
+    the scheduler and retries."""
+    if resp.responseCode == ResponseCode.INVALID_REQUEST and resp.result:
+      start_update_result = resp.result.startJobUpdateResult
+      if start_update_result and start_update_result.updateSummary:
+        in_progress_update_summary = start_update_result.updateSummary
+        if in_progress_update_summary.metadata:
+          active_update_id = [x.value for x in in_progress_update_summary.metadata if x.key ==
+                           CLIENT_UPDATE_ID]
+          if active_update_id and len(active_update_id) == 1:
+            if active_update_id[0] == update_id:
+              return True
+
+    return False
+
+
+def rollback_state_to_err_code(state):
+  return (EXIT_OK if state == JobUpdateStatus.ROLLED_BACK else
+          EXIT_COMMAND_FAILURE if state == JobUpdateStatus.ROLLED_FORWARD else
+          EXIT_UNKNOWN_ERROR)
+
+
+def update_state_to_err_code(state):
+  return (EXIT_OK if state == JobUpdateStatus.ROLLED_FORWARD else
+          EXIT_COMMAND_FAILURE if state == JobUpdateStatus.ROLLED_BACK else
+          EXIT_UNKNOWN_ERROR)
+
+
+def wait_for_update(context, clock, api, update_key, state_to_err_code_func):
   cur_state = None
 
   while True:
@@ -209,12 +263,7 @@ def wait_for_update(context, clock, api, update_key):
         cur_state = new_state
         context.print_out('Current state %s' % JobUpdateStatus._VALUES_TO_NAMES[cur_state])
         if cur_state not in ACTIVE_JOB_UPDATE_STATES:
-          if cur_state == JobUpdateStatus.ROLLED_FORWARD:
-            return EXIT_OK
-          elif cur_state == JobUpdateStatus.ROLLED_BACK:
-            return EXIT_COMMAND_FAILURE
-          else:
-            return EXIT_UNKNOWN_ERROR
+          return state_to_err_code_func(cur_state)
       clock.sleep(5)
     elif len(summaries) == 0:
       raise context.CommandError(EXIT_INVALID_PARAMETER, 'Job update not found.')
@@ -252,7 +301,9 @@ class UpdateWait(Verb):
         context,
         self._clock,
         context.get_api(context.options.jobspec.cluster),
-        JobUpdateKey(job=context.options.jobspec.to_thrift(), id=context.options.id))
+        JobUpdateKey(job=context.options.jobspec.to_thrift(), id=context.options.id),
+        update_state_to_err_code
+    )
 
 
 class PauseUpdate(Verb):
@@ -269,9 +320,10 @@ class PauseUpdate(Verb):
 
   def execute(self, context):
     job_key = context.options.jobspec
-    return UpdateController(context.get_api(job_key.cluster), context).pause(
+    err_code, _ = UpdateController(context.get_api(job_key.cluster), context).pause(
         job_key,
         context.options.message)
+    return err_code
 
 
 class ResumeUpdate(Verb):
@@ -288,9 +340,10 @@ class ResumeUpdate(Verb):
 
   def execute(self, context):
     job_key = context.options.jobspec
-    return UpdateController(context.get_api(job_key.cluster), context).resume(
+    err_code, _ = UpdateController(context.get_api(job_key.cluster), context).resume(
         job_key,
         context.options.message)
+    return err_code
 
 
 class AbortUpdate(Verb):
@@ -307,9 +360,44 @@ class AbortUpdate(Verb):
 
   def execute(self, context):
     job_key = context.options.jobspec
-    return UpdateController(context.get_api(job_key.cluster), context).abort(
+    err_code, _ = UpdateController(context.get_api(job_key.cluster), context).abort(
         job_key,
         context.options.message)
+    return err_code
+
+
+class RollbackUpdate(Verb):
+  def __init__(self, clock=time):
+    self._clock = clock
+
+  @property
+  def name(self):
+    return 'rollback'
+
+  def get_options(self):
+    return [JOBSPEC_ARGUMENT, MESSAGE_OPTION, WAIT_OPTION('Wait until the update rolls back')]
+
+  @property
+  def help(self):
+    return 'Rollback an in-progress update.'
+
+  def execute(self, context):
+    job_key = context.options.jobspec
+    update_controller = UpdateController(
+      context.get_api(job_key.cluster), context)
+
+    err_code, update_key = update_controller.rollback(
+      job_key, context.options.message)
+    if err_code == EXIT_OK and context.options.wait:
+      return wait_for_update(
+        context,
+        self._clock,
+        context.get_api(job_key.cluster),
+        update_key,
+        rollback_state_to_err_code
+      )
+
+    return err_code
 
 
 UpdateFilter = namedtuple('UpdateFilter', ['cluster', 'role', 'env', 'job'])
@@ -472,7 +560,16 @@ class UpdateInfo(Verb):
     api = context.get_api(context.options.jobspec.cluster)
     response = api.get_job_update_details(key)
     context.log_response_and_raise(response)
-    details = response.result.getJobUpdateDetailsResult.details
+    detailsList = response.result.getJobUpdateDetailsResult.detailsList
+    if detailsList is not None:
+      if len(detailsList) == 0:
+        context.print_err("There is no update for key: %s" % key)
+        return EXIT_INVALID_PARAMETER
+
+      details = detailsList[0]
+    else:
+      details = response.result.getJobUpdateDetailsResult.details
+
     if context.options.write_json:
       result = {
         "updateId": ("%s" % details.update.summary.key.id),
@@ -554,6 +651,7 @@ class Update(Noun):
     self.register_verb(PauseUpdate())
     self.register_verb(ResumeUpdate())
     self.register_verb(AbortUpdate())
+    self.register_verb(RollbackUpdate())
     self.register_verb(ListUpdates())
     self.register_verb(UpdateInfo())
     self.register_verb(UpdateWait())

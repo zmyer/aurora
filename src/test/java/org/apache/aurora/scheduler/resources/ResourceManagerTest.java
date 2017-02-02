@@ -32,6 +32,7 @@ import org.junit.Test;
 import static org.apache.aurora.gen.Resource.diskMb;
 import static org.apache.aurora.gen.Resource.namedPort;
 import static org.apache.aurora.gen.Resource.numCpus;
+import static org.apache.aurora.gen.Resource.numGpus;
 import static org.apache.aurora.gen.Resource.ramMb;
 import static org.apache.aurora.scheduler.base.TaskTestUtil.JOB;
 import static org.apache.aurora.scheduler.base.TaskTestUtil.makeTask;
@@ -114,6 +115,7 @@ public class ResourceManagerTest {
   public void testGetTaskResourceTypes() {
     AssignedTask builder = makeTask("id", JOB).newBuilder().getAssignedTask();
     builder.getTask().addToResources(namedPort("health"));
+    builder.getTask().addToResources(numGpus(4));
 
     assertEquals(
         EnumSet.allOf(ResourceType.class),
@@ -172,6 +174,18 @@ public class ResourceManagerTest {
     assertEquals(
         new ResourceBag(ImmutableMap.of(CPUS, 3.0)),
         ResourceManager.bagFromMesosResources(ImmutableSet.of(mesosScalar(CPUS, 3.0))));
+  }
+
+  @Test
+  public void testBagFromMesosResourcesUnsupportedResources() {
+    Protos.Resource unsupported = Protos.Resource.newBuilder()
+        .setName("unknown")
+        .setType(SCALAR)
+        .setScalar(Scalar.newBuilder().setValue(1.0).build()).build();
+    assertEquals(
+        new ResourceBag(ImmutableMap.of(CPUS, 3.0)),
+        ResourceManager.bagFromMesosResources(
+            ImmutableSet.of(mesosScalar(CPUS, 3.0), unsupported)));
   }
 
   @Test

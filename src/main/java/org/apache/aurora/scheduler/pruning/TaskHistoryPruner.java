@@ -14,6 +14,7 @@
 package org.apache.aurora.scheduler.pruning;
 
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.inject.Inject;
 
@@ -27,15 +28,17 @@ import com.google.common.eventbus.Subscribe;
 import org.apache.aurora.common.application.Lifecycle;
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
+import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.common.util.Clock;
 import org.apache.aurora.gen.apiConstants;
+import org.apache.aurora.scheduler.BatchWorker;
+import org.apache.aurora.scheduler.SchedulerModule.TaskEventBatchWorker;
 import org.apache.aurora.scheduler.async.AsyncModule.AsyncExecutor;
 import org.apache.aurora.scheduler.async.DelayExecutor;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.Storage;
-import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.slf4j.Logger;
@@ -55,6 +58,8 @@ public class TaskHistoryPruner implements EventSubscriber {
   private static final Logger LOG = LoggerFactory.getLogger(TaskHistoryPruner.class);
   private static final String FATAL_ERROR_FORMAT =
       "Unexpected problem pruning task history for %s. Triggering shutdown";
+  @VisibleForTesting
+  static final String TASKS_PRUNED = "tasks_pruned";
 
   private final DelayExecutor executor;
   private final StateManager stateManager;
@@ -62,6 +67,8 @@ public class TaskHistoryPruner implements EventSubscriber {
   private final HistoryPrunnerSettings settings;
   private final Storage storage;
   private final Lifecycle lifecycle;
+  private final TaskEventBatchWorker batchWorker;
+  private final AtomicLong prunedTasksCount;
 
   private final Predicate<IScheduledTask> safeToDelete = new Predicate<IScheduledTask>() {
     @Override
@@ -94,7 +101,9 @@ public class TaskHistoryPruner implements EventSubscriber {
       Clock clock,
       HistoryPrunnerSettings settings,
       Storage storage,
-      Lifecycle lifecycle) {
+      Lifecycle lifecycle,
+      TaskEventBatchWorker batchWorker,
+      StatsProvider statsProvider) {
 
     this.executor = requireNonNull(executor);
     this.stateManager = requireNonNull(stateManager);
@@ -102,6 +111,8 @@ public class TaskHistoryPruner implements EventSubscriber {
     this.settings = requireNonNull(settings);
     this.storage = requireNonNull(storage);
     this.lifecycle = requireNonNull(lifecycle);
+    this.batchWorker = requireNonNull(batchWorker);
+    this.prunedTasksCount = statsProvider.makeCounter(TASKS_PRUNED);
   }
 
   @VisibleForTesting
@@ -131,8 +142,11 @@ public class TaskHistoryPruner implements EventSubscriber {
 
   private void deleteTasks(final Set<String> taskIds) {
     LOG.info("Pruning inactive tasks " + taskIds);
-    storage.write(
-        (NoResult.Quiet) storeProvider -> stateManager.deleteTasks(storeProvider, taskIds));
+    batchWorker.execute(storeProvider -> {
+      stateManager.deleteTasks(storeProvider, taskIds);
+      return BatchWorker.NO_RESULT;
+    });
+    prunedTasksCount.addAndGet(taskIds.size());
   }
 
   @VisibleForTesting
@@ -145,7 +159,7 @@ public class TaskHistoryPruner implements EventSubscriber {
       final String taskId,
       long timeRemaining) {
 
-    LOG.debug("Prune task " + taskId + " in " + timeRemaining + " ms.");
+    LOG.debug("Prune task {} in {} ms.", taskId, timeRemaining);
 
     executor.execute(
         shutdownOnError(

@@ -28,12 +28,14 @@ import org.apache.aurora.common.quantity.Data;
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.gen.AssignedTask;
 import org.apache.aurora.gen.Attribute;
+import org.apache.aurora.gen.ExecutorConfig;
 import org.apache.aurora.gen.HostAttributes;
 import org.apache.aurora.gen.JobKey;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskEvent;
+import org.apache.aurora.gen.apiConstants;
 import org.apache.aurora.scheduler.HostOffer;
 import org.apache.aurora.scheduler.TierInfo;
 import org.apache.aurora.scheduler.TierManager;
@@ -63,7 +65,7 @@ import static org.apache.aurora.gen.ScheduleStatus.RUNNING;
 import static org.apache.aurora.scheduler.base.TaskTestUtil.DEV_TIER;
 import static org.apache.aurora.scheduler.base.TaskTestUtil.PREFERRED_TIER;
 import static org.apache.aurora.scheduler.base.TaskTestUtil.REVOCABLE_TIER;
-import static org.apache.aurora.scheduler.filter.AttributeAggregate.EMPTY;
+import static org.apache.aurora.scheduler.filter.AttributeAggregate.empty;
 import static org.apache.aurora.scheduler.preemptor.PreemptionVictimFilter.PreemptionVictimFilterImpl.ORDER;
 import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.MISSING_ATTRIBUTES_NAME;
 import static org.apache.aurora.scheduler.resources.ResourceTestUtil.bag;
@@ -127,7 +129,7 @@ public class PreemptionVictimFilterTest extends EasyMockTest {
     return filter.filterPreemptionVictims(
         ITaskConfig.build(pendingTask.getAssignedTask().getTask()),
         preemptionVictims(victims),
-        EMPTY,
+        empty(),
         offer,
         storageUtil.mutableStoreProvider);
   }
@@ -639,7 +641,8 @@ public class PreemptionVictimFilterTest extends EasyMockTest {
             .setJob(new JobKey(role, env, job))
             .setPriority(priority)
             .setProduction(production)
-            .setConstraints(Sets.newHashSet()));
+            .setConstraints(Sets.newHashSet())
+            .setExecutorConfig(new ExecutorConfig(apiConstants.AURORA_EXECUTOR_NAME, "config")));
     return new ScheduledTask().setAssignedTask(assignedTask);
   }
 

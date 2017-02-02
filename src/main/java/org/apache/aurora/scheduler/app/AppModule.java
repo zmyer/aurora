@@ -94,6 +94,16 @@ public class AppModule extends AbstractModule {
       help = "If false, Docker tasks may run without an executor (EXPERIMENTAL)")
   private static final Arg<Boolean> REQUIRE_DOCKER_USE_EXECUTOR = Arg.create(true);
 
+  @CmdLine(name = "enable_mesos_fetcher", help = "Allow jobs to pass URIs "
+      + "to the Mesos Fetcher. Note that enabling this feature could pose "
+      + "a privilege escalation threat.")
+  private static final Arg<Boolean> ENABLE_MESOS_FETCHER = Arg.create(false);
+
+  @CmdLine(name = "allow_container_volumes",
+      help = "Allow passing in volumes in the job. Enabling this could pose a privilege "
+          + "escalation threat.")
+  private static final Arg<Boolean> ALLOW_CONTAINER_VOLUMES = Arg.create(false);
+
   private final ConfigurationManagerSettings configurationManagerSettings;
 
   @VisibleForTesting
@@ -101,12 +111,15 @@ public class AppModule extends AbstractModule {
     this.configurationManagerSettings = requireNonNull(configurationManagerSettings);
   }
 
-  public AppModule() {
+  public AppModule(boolean allowGpuResource) {
     this(new ConfigurationManagerSettings(
         ImmutableSet.copyOf(ALLOWED_CONTAINER_TYPES.get()),
         ENABLE_DOCKER_PARAMETERS.get(),
         DEFAULT_DOCKER_PARAMETERS.get(),
-        REQUIRE_DOCKER_USE_EXECUTOR.get()));
+        REQUIRE_DOCKER_USE_EXECUTOR.get(),
+        allowGpuResource,
+        ENABLE_MESOS_FETCHER.get(),
+        ALLOW_CONTAINER_VOLUMES.get()));
   }
 
   @Override

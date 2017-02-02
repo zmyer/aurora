@@ -23,6 +23,7 @@ from twitter.common.process import ProcessProviderFactory
 from twitter.common.quantity import Amount, Time
 
 from apache.thermos.config.schema import Process, Task
+from apache.thermos.core.helper import TaskRunnerHelper
 from apache.thermos.core.runner import TaskRunner
 from apache.thermos.monitoring.monitor import TaskMonitor
 from apache.thermos.testing.runner import Runner
@@ -281,6 +282,11 @@ class TestRunnerKillProcessGroup(RunnerBase):
 
     state = tm.get_state()
     assert state.processes['process'][0].state == ProcessState.SUCCESS
+
+    # Another test case may have called setup_child_subreaping(). We therefore have to reap any
+    # terminated re-parented child processes to ensure that we don't list already terminated
+    # processes (i.e. zombies) in ps.pids() below.
+    TaskRunnerHelper.reap_children()
 
     ps.collect_all()
     assert parent_pid not in ps.pids()

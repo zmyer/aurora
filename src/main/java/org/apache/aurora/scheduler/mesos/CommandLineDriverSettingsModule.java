@@ -23,7 +23,6 @@ import java.util.Properties;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 import com.google.inject.AbstractModule;
 
 import org.apache.aurora.common.args.Arg;
@@ -37,6 +36,7 @@ import org.slf4j.LoggerFactory;
 
 import static org.apache.mesos.Protos.FrameworkInfo;
 import static org.apache.mesos.Protos.FrameworkInfo.Capability;
+import static org.apache.mesos.Protos.FrameworkInfo.Capability.Type.GPU_RESOURCES;
 import static org.apache.mesos.Protos.FrameworkInfo.Capability.Type.REVOCABLE_RESOURCES;
 
 /**
@@ -77,9 +77,8 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
   private static final Arg<Boolean> FRAMEWORK_ANNOUNCE_PRINCIPAL = Arg.create(false);
 
   @CmdLine(name = "framework_name",
-      help = "Name used to register the Aurora framework with Mesos. Changing this value can be "
-          + "backwards incompatible. For details, see MESOS-703.")
-  private static final Arg<String> FRAMEWORK_NAME = Arg.create("TwitterScheduler");
+      help = "Name used to register the Aurora framework with Mesos.")
+  private static final Arg<String> FRAMEWORK_NAME = Arg.create("Aurora");
 
   @CmdLine(name = "executor_user",
       help = "User to start the executor. Defaults to \"root\". "
@@ -87,7 +86,7 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
           + "\"--no-root_submissions\". If set to anything other than \"root\", the executor "
           + "will ignore the \"role\" setting for jobs since it can't use setuid() anymore. "
           + "This means that all your jobs will run under the specified user and the user has "
-          + "to exist on the mesos slaves.")
+          + "to exist on the Mesos agents.")
   private static final Arg<String> EXECUTOR_USER = Arg.create("root");
 
   @CmdLine(name = "receive_revocable_resources",
@@ -99,6 +98,12 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
           + "and the framework will register without any role and only receive unreserved "
           + "resources in offer.")
   private static final Arg<String> MESOS_ROLE = Arg.create();
+
+  private final boolean allowGpuResource;
+
+  public CommandLineDriverSettingsModule(boolean allowGpuResource) {
+    this.allowGpuResource = allowGpuResource;
+  }
 
   @Override
   protected void configure() {
@@ -118,6 +123,7 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
             principal,
             FRAMEWORK_FAILOVER_TIMEOUT.get(),
             RECEIVE_REVOCABLE_RESOURCES.get(),
+            allowGpuResource,
             role));
     bind(DriverSettings.class).toInstance(settings);
   }
@@ -129,7 +135,7 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
         properties = parseCredentials(new FileInputStream(FRAMEWORK_AUTHENTICATION_FILE.get()));
       } catch (FileNotFoundException e) {
         LOG.error("Authentication File not Found");
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
 
       LOG.info(
@@ -146,12 +152,17 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
   }
 
   @VisibleForTesting
+  // See: https://github.com/apache/mesos/commit/d06d05c76eca13745ca73039b93ad684b9d07196
+  // The role field has been deprecated but the replacement is not ready. We'll also have to
+  // turn on MULTI_ROLES capability before we can use the roles field.
+  @SuppressWarnings("deprecation")
   static FrameworkInfo buildFrameworkInfo(
       String frameworkName,
       String executorUser,
       Optional<String> principal,
       Amount<Long, Time> failoverTimeout,
       boolean revocable,
+      boolean allowGpu,
       Optional<String> role) {
 
     FrameworkInfo.Builder infoBuilder = FrameworkInfo.newBuilder()
@@ -168,6 +179,10 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
       infoBuilder.addCapabilities(Capability.newBuilder().setType(REVOCABLE_RESOURCES));
     }
 
+    if (allowGpu) {
+      infoBuilder.addCapabilities(Capability.newBuilder().setType(GPU_RESOURCES));
+    }
+
     if (role.isPresent()) {
       infoBuilder.setRole(role.get());
     }
@@ -182,7 +197,7 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
       properties.load(credentialsStream);
     } catch (IOException e) {
       LOG.error("Unable to load authentication file");
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
     Preconditions.checkState(properties.containsKey(PRINCIPAL_KEY),
         "The framework authentication file is missing the key: %s", PRINCIPAL_KEY);

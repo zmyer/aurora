@@ -13,11 +13,16 @@
  */
 package org.apache.aurora.benchmark;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import javax.inject.Singleton;
 
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterators;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import com.google.common.eventbus.EventBus;
 import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
@@ -92,6 +97,7 @@ public class SchedulingBenchmarks {
   public abstract static class AbstractBase {
     private static final Amount<Long, Time> NO_DELAY = Amount.of(1L, Time.MILLISECONDS);
     private static final Amount<Long, Time> DELAY_FOREVER = Amount.of(30L, Time.DAYS);
+    private static final Integer BATCH_SIZE = 5;
     protected Storage storage;
     protected PendingTaskProcessor pendingTaskProcessor;
     private TaskScheduler taskScheduler;
@@ -104,7 +110,7 @@ public class SchedulingBenchmarks {
      */
     @Setup(Level.Trial)
     public void setUpBenchmark() {
-      storage = DbUtil.createStorage();
+      storage = DbUtil.createFlaggedStorage();
       eventBus = new EventBus();
       final FakeClock clock = new FakeClock();
       clock.setNowMillis(System.currentTimeMillis());
@@ -112,8 +118,8 @@ public class SchedulingBenchmarks {
       // TODO(maxim): Find a way to DRY it and reuse existing modules instead.
       Injector injector = Guice.createInjector(
           new StateModule(),
-          new PreemptorModule(true, NO_DELAY, NO_DELAY),
-          new TierModule(TaskTestUtil.DEV_TIER_CONFIG),
+          new PreemptorModule(true, NO_DELAY, NO_DELAY, BATCH_SIZE),
+          new TierModule(TaskTestUtil.TIER_CONFIG),
           new PrivateModule() {
             @Override
             protected void configure() {
@@ -180,22 +186,24 @@ public class SchedulingBenchmarks {
     }
 
     private Set<IScheduledTask> buildClusterTasks(int numOffers) {
-      int numOffersToFill = (int) Math.round(numOffers * settings.getClusterUtilization());
-      return new Tasks.Builder()
+      int numSiblingTasks = (int) Math.round(numOffers * settings.getSiblingClusterUtilization());
+      int numVictimTasks = (int) Math.round(numOffers * settings.getVictimClusterUtilization());
+      return Sets.union(
+        new Tasks.Builder()
+          .build(numSiblingTasks),
+        new Tasks.Builder()
           .setRole("victim")
           .setProduction(!settings.areAllVictimsEligibleForPreemption())
-          .build(numOffersToFill);
+          .build(numVictimTasks));
     }
 
     private void fillUpCluster(int numOffers) {
       Set<IScheduledTask> tasksToAssign = buildClusterTasks(numOffers);
       saveTasks(tasksToAssign);
-      for (IScheduledTask scheduledTask : tasksToAssign) {
-        taskScheduler.schedule(scheduledTask.getAssignedTask().getTaskId());
-      }
+      schedule(tasksToAssign);
     }
 
-    private void saveTasks(final Set<IScheduledTask> tasks) {
+    protected void saveTasks(final Set<IScheduledTask> tasks) {
       storage.write(
           (NoResult.Quiet) storeProvider -> storeProvider.getUnsafeTaskStore().saveTasks(tasks));
     }
@@ -211,19 +219,55 @@ public class SchedulingBenchmarks {
     protected abstract BenchmarkSettings getSettings();
 
     /**
-     * Benchmark entry point. All settings (e.g. iterations, benchmarkMode and etc.) are defined
-     * in build.gradle.
+     * Benchmark entry point.
      *
      * @return A "blackhole" to make sure the result is not optimized out.
      * See {@see http://openjdk.java.net/projects/code-tools/jmh/} for more info.
      */
     @Benchmark
-    public boolean runBenchmark() {
-      boolean result = false;
-      for (IScheduledTask task : settings.getTasks()) {
-        result = taskScheduler.schedule(task.getAssignedTask().getTaskId());
-      }
-      return result;
+    public Set<String> runBenchmark() {
+      return schedule(settings.getTasks());
+    }
+
+    protected Set<String> schedule(Set<IScheduledTask> tasks) {
+      return storage.write((Storage.MutateWork.Quiet<Set<String>>) store -> {
+        Set<String> result = null;
+
+        List<List<IScheduledTask>> partitionedTasks = Lists.newArrayList(
+            Iterators.partition(tasks.iterator(), 5));
+
+        for (List<IScheduledTask> partition : partitionedTasks) {
+          result = taskScheduler.schedule(
+              store,
+              org.apache.aurora.scheduler.base.Tasks.ids(partition));
+        }
+        return result;
+      });
+    }
+  }
+
+  /**
+   * Tests the successful scheduling of tasks in an almost empty cluster.
+   * The cluster will be filled progressively over benchmark repetitions.
+   */
+  public static class FillClusterBenchmark extends AbstractBase {
+    @Override
+    protected BenchmarkSettings getSettings() {
+      return new BenchmarkSettings.Builder()
+          .setSiblingClusterUtilization(0.01)
+          .setVictimClusterUtilization(0.01)
+          .setHostAttributes(new Hosts.Builder().setNumHostsPerRack(2).build(200000))
+          .setTasks(new Tasks.Builder().build(0))
+          .build();
+    }
+
+    @Override
+    public Set<String> runBenchmark() {
+      // In contrast to the other tests in this file we have to create new tasks for each
+      // benchmark repetition to make sure they can actually be scheduled.
+      Set<IScheduledTask> tasks = new Tasks.Builder().build(10);
+      saveTasks(tasks);
+      return schedule(tasks);
     }
   }
 
@@ -280,7 +324,8 @@ public class SchedulingBenchmarks {
     @Override
     protected BenchmarkSettings getSettings() {
       return new BenchmarkSettings.Builder()
-          .setClusterUtilization(1.0)
+          .setSiblingClusterUtilization(0.1)
+          .setVictimClusterUtilization(0.9)
           .setVictimPreemptionEligibilty(true)
           .setHostAttributes(new Hosts.Builder().setNumHostsPerRack(2).build(10000))
           .setTasks(new Tasks.Builder()
@@ -300,7 +345,8 @@ public class SchedulingBenchmarks {
     @Override
     protected BenchmarkSettings getSettings() {
       return new BenchmarkSettings.Builder()
-          .setClusterUtilization(1.0)
+          .setSiblingClusterUtilization(0.1)
+          .setVictimClusterUtilization(0.9)
           .setHostAttributes(new Hosts.Builder().setNumHostsPerRack(2).build(10000))
           .setTasks(new Tasks.Builder()
               .setProduction(true)
@@ -309,10 +355,10 @@ public class SchedulingBenchmarks {
     }
 
     @Override
-    public boolean runBenchmark() {
+    public Set<String> runBenchmark() {
       pendingTaskProcessor.run();
       // Return non-guessable result to satisfy "blackhole" requirement.
-      return System.currentTimeMillis() % 5 == 0;
+      return ImmutableSet.of("" + System.currentTimeMillis());
     }
   }
 }

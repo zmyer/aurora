@@ -69,7 +69,8 @@ public class PreemptorModuleTest extends EasyMockTest {
     Injector injector = createInjector(new PreemptorModule(
         false,
         Amount.of(0L, Time.SECONDS),
-        Amount.of(0L, Time.SECONDS)));
+        Amount.of(0L, Time.SECONDS),
+        5));
 
     control.replay();
 
@@ -78,7 +79,7 @@ public class PreemptorModuleTest extends EasyMockTest {
         Optional.absent(),
         injector.getInstance(Preemptor.class).attemptPreemptionFor(
             IAssignedTask.build(new AssignedTask()),
-            AttributeAggregate.EMPTY,
+            AttributeAggregate.empty(),
             storageUtil.mutableStoreProvider));
   }
 }

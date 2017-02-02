@@ -34,6 +34,7 @@ import gen.apache.aurora.api.AuroraAdmin as AuroraAdmin
 import gen.apache.aurora.api.AuroraSchedulerManager as AuroraSchedulerManager
 from gen.apache.aurora.api.constants import BYPASS_LEADER_REDIRECT_HEADER_NAME
 from gen.apache.aurora.api.ttypes import (
+    ExplicitReconciliationSettings,
     Hosts,
     JobConfiguration,
     JobKey,
@@ -183,6 +184,11 @@ class TestSchedulerProxyInjection(unittest.TestCase):
     self.mox.ReplayAll()
     self.make_scheduler_proxy().abortJobUpdate('update_id')
 
+  def test_rollbackJobUpdate(self):
+    self.mock_thrift_client.rollbackJobUpdate('update_id').AndReturn(DEFAULT_RESPONSE)
+    self.mox.ReplayAll()
+    self.make_scheduler_proxy().rollbackJobUpdate('update_id')
+
   def test_pulseJobUpdate(self):
     self.mock_thrift_client.pulseJobUpdate('update_id').AndReturn(DEFAULT_RESPONSE)
     self.mox.ReplayAll()
@@ -281,6 +287,18 @@ class TestSchedulerProxyAdminInjection(TestSchedulerProxyInjection):
         IsA(RewriteConfigsRequest)).AndReturn(DEFAULT_RESPONSE)
     self.mox.ReplayAll()
     self.make_scheduler_proxy().rewriteConfigs(RewriteConfigsRequest())
+
+  def test_triggerExplicitTaskReconciliation(self):
+    self.mock_thrift_client.triggerExplicitTaskReconciliation(
+      IsA(ExplicitReconciliationSettings)).AndReturn(DEFAULT_RESPONSE)
+    self.mox.ReplayAll()
+    self.make_scheduler_proxy().triggerExplicitTaskReconciliation(
+      ExplicitReconciliationSettings(batchSize=None))
+
+  def test_triggerImplicitTaskReconciliation(self):
+    self.mock_thrift_client.triggerImplicitTaskReconciliation().AndReturn(DEFAULT_RESPONSE)
+    self.mox.ReplayAll()
+    self.make_scheduler_proxy().triggerImplicitTaskReconciliation()
 
 
 def mock_auth():

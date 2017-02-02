@@ -17,6 +17,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Set;
 
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
 import com.google.common.base.Function;
@@ -35,6 +36,7 @@ import org.apache.aurora.gen.ConfigSummary;
 import org.apache.aurora.gen.ConfigSummaryResult;
 import org.apache.aurora.gen.GetJobUpdateDiffResult;
 import org.apache.aurora.gen.GetQuotaResult;
+import org.apache.aurora.gen.GetTierConfigResult;
 import org.apache.aurora.gen.Identity;
 import org.apache.aurora.gen.JobConfiguration;
 import org.apache.aurora.gen.JobKey;
@@ -48,6 +50,7 @@ import org.apache.aurora.gen.JobUpdateQuery;
 import org.apache.aurora.gen.JobUpdateRequest;
 import org.apache.aurora.gen.JobUpdateSettings;
 import org.apache.aurora.gen.JobUpdateSummary;
+import org.apache.aurora.gen.Metadata;
 import org.apache.aurora.gen.PendingReason;
 import org.apache.aurora.gen.PopulateJobResult;
 import org.apache.aurora.gen.Range;
@@ -61,6 +64,7 @@ import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskQuery;
+import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.Query.Builder;
@@ -118,10 +122,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class ReadOnlySchedulerImplTest extends EasyMockTest {
+  private static final ImmutableSet<Metadata> METADATA =
+      ImmutableSet.of(new Metadata("k1", "v1"), new Metadata("k2", "v2"), new Metadata("k3", "v3"));
+
   private StorageTestUtil storageUtil;
   private NearestFit nearestFit;
   private CronPredictor cronPredictor;
   private QuotaManager quotaManager;
+  private TierManager tierManager;
 
   private ReadOnlyScheduler.Iface thrift;
 
@@ -132,13 +140,15 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     nearestFit = createMock(NearestFit.class);
     cronPredictor = createMock(CronPredictor.class);
     quotaManager = createMock(QuotaManager.class);
+    tierManager = createMock(TierManager.class);
 
     thrift = new ReadOnlySchedulerImpl(
         TaskTestUtil.CONFIGURATION_MANAGER,
         storageUtil.storage,
         nearestFit,
         cronPredictor,
-        quotaManager);
+        quotaManager,
+        tierManager);
   }
 
   @Test
@@ -596,10 +606,27 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
 
     control.replay();
 
-    Response response = assertOkResponse(thrift.getJobUpdateDetails(UPDATE_KEY.newBuilder()));
+    Response response = assertOkResponse(thrift.getJobUpdateDetails(UPDATE_KEY.newBuilder(), null));
     assertEquals(
         IJobUpdateDetails.build(details),
         IJobUpdateDetails.build(response.getResult().getGetJobUpdateDetailsResult().getDetails()));
+    // Specifying the UPDATE_KEY alone is deprecated, so there should be a message.
+    assertEquals(1, response.getDetailsSize());
+  }
+
+  @Test
+  public void testGetJobUpdateDetailsQuery() throws Exception {
+    JobUpdateQuery query = new JobUpdateQuery().setRole(ROLE);
+    List<IJobUpdateDetails> details = IJobUpdateDetails.listFromBuilders(createJobUpdateDetails(5));
+    expect(storageUtil.jobUpdateStore.fetchJobUpdateDetails(IJobUpdateQuery.build(query)))
+        .andReturn(details);
+
+    control.replay();
+
+    Response response = assertOkResponse(thrift.getJobUpdateDetails(null, query));
+    assertEquals(
+        IJobUpdateDetails.toBuildersList(details),
+        response.getResult().getGetJobUpdateDetailsResult().getDetailsList());
   }
 
   private static List<JobUpdateSummary> createJobUpdateSummaries(int count) {
@@ -607,14 +634,22 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     for (int i = 0; i < count; i++) {
       builder.add(new JobUpdateSummary()
           .setKey(new JobUpdateKey(JOB_KEY.newBuilder(), "id" + 1))
-          .setUser(USER));
+          .setUser(USER)
+          .setMetadata(METADATA));
     }
     return builder.build();
   }
 
+  private static List<JobUpdateDetails> createJobUpdateDetails(int count) {
+    List<JobUpdateSummary> summaries = createJobUpdateSummaries(count);
+    return summaries.stream()
+        .map(jobUpdateSummary ->
+            new JobUpdateDetails().setUpdate(new JobUpdate().setSummary(jobUpdateSummary)))
+        .collect(Collectors.toList());
+  }
+
   private static JobUpdateDetails createJobUpdateDetails() {
-    return new JobUpdateDetails()
-        .setUpdate(new JobUpdate().setSummary(createJobUpdateSummaries(1).get(0)));
+    return createJobUpdateDetails(1).get(0);
   }
 
   @Test
@@ -701,7 +736,7 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
 
     control.replay();
 
-    assertResponse(INVALID_REQUEST, thrift.getJobUpdateDetails(UPDATE_KEY.newBuilder()));
+    assertResponse(INVALID_REQUEST, thrift.getJobUpdateDetails(UPDATE_KEY.newBuilder(), null));
   }
 
   @Test
@@ -821,9 +856,11 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
   @Test
   public void testGetJobUpdateDiffInvalidConfig() throws Exception {
     control.replay();
+    TaskConfig task = defaultTask(false).setNumCpus(-1);
+    task.unsetResources();
 
     JobUpdateRequest request =
-        new JobUpdateRequest().setTaskConfig(defaultTask(false).setNumCpus(-1));
+        new JobUpdateRequest().setTaskConfig(task);
     assertResponse(INVALID_REQUEST, thrift.getJobUpdateDiff(request));
   }
 
@@ -843,5 +880,19 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     return new ConfigGroup()
         .setConfig(task)
         .setInstances(ImmutableSet.of(range));
+  }
+
+  @Test
+  public void testGetTierConfig() throws Exception {
+    expect(tierManager.getDefaultTierName()).andReturn("preemptible");
+    expect(tierManager.getTiers()).andReturn(TaskTestUtil.tierInfos());
+    control.replay();
+
+    GetTierConfigResult expected = new GetTierConfigResult()
+        .setDefaultTierName("preemptible")
+        .setTiers(TaskTestUtil.tierConfigs());
+
+    Response response = assertOkResponse(thrift.getTierConfigs());
+    assertEquals(expected, response.getResult().getGetTierConfigResult());
   }
 }

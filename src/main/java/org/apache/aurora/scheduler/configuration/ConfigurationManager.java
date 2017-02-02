@@ -38,11 +38,13 @@ import org.apache.aurora.gen.TaskConstraint;
 import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.UserProvidedStrings;
+import org.apache.aurora.scheduler.configuration.executor.ExecutorSettings;
 import org.apache.aurora.scheduler.resources.ResourceManager;
 import org.apache.aurora.scheduler.resources.ResourceType;
 import org.apache.aurora.scheduler.storage.entities.IConstraint;
 import org.apache.aurora.scheduler.storage.entities.IContainer;
 import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
+import org.apache.aurora.scheduler.storage.entities.IMesosContainer;
 import org.apache.aurora.scheduler.storage.entities.IResource;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.apache.aurora.scheduler.storage.entities.ITaskConstraint;
@@ -51,6 +53,7 @@ import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
 
 import static java.util.Objects.requireNonNull;
 
+import static org.apache.aurora.scheduler.resources.ResourceType.GPUS;
 import static org.apache.aurora.scheduler.resources.ResourceType.PORTS;
 
 /**
@@ -114,27 +117,45 @@ public class ConfigurationManager {
     private final boolean allowDockerParameters;
     private final Multimap<String, String> defaultDockerParameters;
     private final boolean requireDockerUseExecutor;
+    private final boolean allowGpuResource;
+    private final boolean enableMesosFetcher;
+    private final boolean allowContainerVolumes;
 
     public ConfigurationManagerSettings(
         ImmutableSet<Container._Fields> allowedContainerTypes,
         boolean allowDockerParameters,
         Multimap<String, String> defaultDockerParameters,
-        boolean requireDockerUseExecutor) {
+        boolean requireDockerUseExecutor,
+        boolean allowGpuResource,
+        boolean enableMesosFetcher,
+        boolean allowContainerVolumes) {
 
       this.allowedContainerTypes = requireNonNull(allowedContainerTypes);
       this.allowDockerParameters = allowDockerParameters;
       this.defaultDockerParameters = requireNonNull(defaultDockerParameters);
       this.requireDockerUseExecutor = requireDockerUseExecutor;
+      this.allowGpuResource = allowGpuResource;
+      this.enableMesosFetcher = enableMesosFetcher;
+      this.allowContainerVolumes = allowContainerVolumes;
     }
   }
 
   private final ConfigurationManagerSettings settings;
   private final TierManager tierManager;
+  private final ThriftBackfill thriftBackfill;
+  private final ExecutorSettings executorSettings;
 
   @Inject
-  public ConfigurationManager(ConfigurationManagerSettings settings, TierManager tierManager) {
+  public ConfigurationManager(
+      ConfigurationManagerSettings settings,
+      TierManager tierManager,
+      ThriftBackfill thriftBackfill,
+      ExecutorSettings executorSettings) {
+
     this.settings = requireNonNull(settings);
     this.tierManager = requireNonNull(tierManager);
+    this.thriftBackfill = requireNonNull(thriftBackfill);
+    this.executorSettings = requireNonNull(executorSettings);
   }
 
   private static String getRole(IValueConstraint constraint) {
@@ -207,6 +228,20 @@ public class ConfigurationManager {
   static final String EXECUTOR_REQUIRED_WITH_DOCKER =
       "This scheduler is configured to require an executor for Docker-based tasks.";
 
+  @VisibleForTesting
+  static final String MESOS_FETCHER_DISABLED =
+      "Mesos Fetcher for individual jobs is disabled in this cluster.";
+
+  @VisibleForTesting
+  public static final String NO_EXECUTOR_OR_CONTAINER = "Configuration may not be null.";
+
+  @VisibleForTesting
+  static final String INVALID_EXECUTOR_CONFIG = "Executor name may not be left unset.";
+
+  @VisibleForTesting
+  static final String NO_CONTAINER_VOLUMES =
+      "This scheduler is configured to disallow container volumes.";
+
   /**
    * Check validity of and populates defaults in a task configuration.  This will return a deep copy
    * of the provided task configuration with default configuration values applied, and configuration
@@ -243,12 +278,20 @@ public class ConfigurationManager {
     if (!builder.isSetExecutorConfig()
         && !(builder.isSetContainer() && builder.getContainer().isSetDocker())) {
 
-      throw new TaskDescriptionException("Configuration may not be null");
+      throw new TaskDescriptionException(NO_EXECUTOR_OR_CONTAINER);
     }
 
-    // Maximize the usefulness of any thrown error message by checking required fields first.
-    for (RequiredFieldValidator<?> validator : REQUIRED_FIELDS_VALIDATORS) {
-      validator.validate(builder);
+    // Docker containers don't require executors, validate the rest
+    if (builder.isSetExecutorConfig()) {
+
+      if (!builder.getExecutorConfig().isSetName())  {
+        throw new TaskDescriptionException(INVALID_EXECUTOR_CONFIG);
+      }
+
+      executorSettings.getExecutorConfig(builder.getExecutorConfig().getName()).orElseThrow(
+          () -> new TaskDescriptionException("Configuration for executor '"
+              + builder.getExecutorConfig().getName()
+              + "' doesn't exist."));
     }
 
     IConstraint constraint = getDedicatedConstraint(config);
@@ -307,7 +350,11 @@ public class ConfigurationManager {
               + containerType.get().toString());
     }
 
-    ThriftBackfill.backfillTask(builder);
+    thriftBackfill.backfillTask(builder);
+
+    for (RequiredFieldValidator<?> validator : REQUIRED_FIELDS_VALIDATORS) {
+      validator.validate(builder);
+    }
 
     String types = config.getResources().stream()
         .collect(Collectors.groupingBy(e -> ResourceType.fromResource(e)))
@@ -319,6 +366,25 @@ public class ConfigurationManager {
 
     if (!Strings.isNullOrEmpty(types)) {
       throw new TaskDescriptionException("Multiple resource values are not supported for " + types);
+    }
+
+    if (!settings.allowGpuResource && config.getResources().stream()
+        .filter(r -> ResourceType.fromResource(r).equals(GPUS))
+        .findAny()
+        .isPresent()) {
+
+      throw new TaskDescriptionException("GPU resource support is disabled in this cluster.");
+    }
+
+    if (!settings.enableMesosFetcher && !config.getMesosFetcherUris().isEmpty()) {
+      throw new TaskDescriptionException(MESOS_FETCHER_DISABLED);
+    }
+
+    if (config.getContainer().isSetMesos()) {
+      IMesosContainer container = config.getContainer().getMesos();
+      if (!settings.allowContainerVolumes && !container.getVolumes().isEmpty()) {
+        throw new TaskDescriptionException(NO_CONTAINER_VOLUMES);
+      }
     }
 
     maybeFillLinks(builder);

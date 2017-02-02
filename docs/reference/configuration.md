@@ -121,30 +121,27 @@ schedule.
 
 #### logger
 
-The default behavior of Thermos is to store  stderr/stdout logs in files which grow unbounded.
-In the event that you have large log volume, you may want to configure Thermos to automatically rotate logs
-after they grow to a certain size, which can prevent your job from using more than its allocated
-disk space.
+The default behavior of Thermos is to store stderr/stdout logs in files which grow unbounded.
+In the event that you have large log volume, you may want to configure Thermos to automatically
+rotate logs after they grow to a certain size, which can prevent your job from using more than its
+allocated disk space.
 
-A Logger union consists of a destination enum, a mode enum and a rotation policy.
-It's to set where the process logs should be sent using `destination`. Default
-option is `file`. Its also possible to specify `console` to get logs output
-to stdout/stderr, `none` to suppress any logs output or `both` to send logs to files and
-console output. In case of using `none` or `console` rotation attributes are ignored.
-Rotation policies only apply to loggers whose mode is `rotate`. The acceptable values
-for the LoggerMode enum are `standard` and `rotate`. The rotation policy applies to both
-stderr and stdout.
+Logger objects specify a `destination` for Process logs which is, by default, `file` - a pair of
+`stdout` and `stderr` files. Its also possible to specify `console` to get logs output to
+the Process stdout and stderr streams, `none` to suppress any logs output or `both` to send logs to
+files and console streams.
 
-By default, all processes use the `standard` LoggerMode.
+The default Logger `mode` is `standard` which lets the stdout and stderr streams grow without bound.
 
   **Attribute Name**  | **Type**          | **Description**
   ------------------- | :---------------: | ---------------------------------
    **destination**    | LoggerDestination | Destination of logs. (Default: `file`)
    **mode**           | LoggerMode        | Mode of the logger. (Default: `standard`)
-   **rotate**         | RotatePolicy      | An optional rotation policy.
+   **rotate**         | RotatePolicy      | An optional rotation policy. (Default: `Empty`)
 
-A RotatePolicy describes log rotation behavior for when `mode` is set to `rotate`. It is ignored
-otherwise.
+A RotatePolicy describes log rotation behavior for when `mode` is set to `rotate` and it is ignored
+otherwise. If `rotate` is `Empty` or `RotatePolicy()` when the `mode` is set to `rotate` the
+defaults below are used.
 
   **Attribute Name**  | **Type**     | **Description**
   ------------------- | :----------: | ---------------------------------
@@ -321,6 +318,7 @@ resources are allocated.
   ```cpu```  | Float   | Fractional number of cores required by the task.
   ```ram```  | Integer | Bytes of RAM required by the task.
   ```disk``` | Integer | Bytes of disk required by the task.
+  ```gpu```  | Integer | Number of GPU cores required by the task
 
 
 Job Schema
@@ -331,6 +329,9 @@ Job Schema
 *Note: Specifying a ```Container``` object as the value of the ```container``` property is
   deprecated in favor of setting its value directly to the appropriate ```Docker``` or ```Mesos```
   container type*
+
+*Note: Specifying preemption behavior of tasks through `production` flag is deprecated in favor of
+  electing appropriate task tier via `tier` attribute.*
 
    name | type | description
    ------ | :-------: | -------
@@ -348,11 +349,13 @@ Job Schema
   ```service``` | Boolean | If True, restart tasks regardless of success or failure. (Default: False)
   ```max_task_failures``` | Integer | Maximum number of failures after which the task is considered to have failed (Default: 1) Set to -1 to allow for infinite failures
   ```priority``` | Integer | Preemption priority to give the task (Default 0). Tasks with higher priorities may preempt tasks at lower priorities.
-  ```production``` | Boolean |  Whether or not this is a production task that may [preempt](../features/multitenancy.md#preemption) other tasks (Default: False). Production job role must have the appropriate [quota](../features/multitenancy.md#preemption).
+  ```production``` | Boolean |  (Deprecated) Whether or not this is a production task that may [preempt](../features/multitenancy.md#preemption) other tasks (Default: False). Production job role must have the appropriate [quota](../features/multitenancy.md#preemption).
   ```health_check_config``` | ```HealthCheckConfig``` object | Parameters for controlling a task's health checks. HTTP health check is only used if a  health port was assigned with a command line wildcard.
   ```container``` | Choice of ```Container```, ```Docker``` or ```Mesos``` object | An optional container to run all processes inside of.
   ```lifecycle``` | ```LifecycleConfig``` object | An optional task lifecycle configuration that dictates commands to be executed on startup/teardown.  HTTP lifecycle is enabled by default if the "health" port is requested.  See [LifecycleConfig Objects](#lifecycleconfig-objects) for more information.
-  ```tier``` | String | Task tier type. The default scheduler tier configuration allows for 3 tiers: `revocable`, `preemptible`, and `preferred`. The `revocable` tier requires the task to run with Mesos revocable resources. Setting the task's tier to `preemptible` allows for the possibility of that task being preempted by other tasks when cluster is running low on resources. The `preferred` tier prevents the task from using revocable resources and from being preempted. Since it is possible that a cluster is configured with a custom tier configuration, users should consult their cluster administrator to be informed of the tiers supported by the cluster. Attempts to schedule jobs with an unsupported tier will be rejected by the scheduler.
+  ```tier``` | String | Task tier type. The default scheduler tier configuration allows for 3 tiers: `revocable`, `preemptible`, and `preferred`. If a tier is not elected, Aurora assigns the task to a tier based on its choice of `production` (that is `preferred` for production and `preemptible` for non-production jobs). See the section on [Configuration Tiers](../features/multitenancy.md#configuration-tiers) for more information.
+  ```announce``` | ```Announcer``` object | Optionally enable Zookeeper ServerSet announcements. See [Announcer Objects] for more information.
+  ```enable_hooks``` | Boolean | Whether to enable [Client Hooks](client-hooks.md) for this job. (Default: False)
 
 
 ### UpdateConfig Objects
@@ -376,9 +379,10 @@ Parameters for controlling a task's health checks via HTTP or a shell command.
 | param                          | type      | description
 | -------                        | :-------: | --------
 | ```health_checker```           | HealthCheckerConfig | Configure what kind of health check to use.
-| ```initial_interval_secs```    | Integer   | Initial delay for performing a health check. (Default: 15)
+| ```initial_interval_secs```    | Integer   | Initial grace period (during which health-check failures are ignored) while performing health checks. (Default: 15)
 | ```interval_secs```            | Integer   | Interval on which to check the task's health. (Default: 10)
 | ```max_consecutive_failures``` | Integer   | Maximum number of consecutive failures that will be tolerated before considering a task unhealthy (Default: 0)
+| ```min_consecutive_successes``` | Integer   | Minimum number of consecutive successful health checks required before considering a task healthy (Default: 1)
 | ```timeout_secs```             | Integer   | Health check timeout. (Default: 1)
 
 ### HealthCheckerConfig Objects
@@ -448,37 +452,16 @@ tasks with the same static port allocations from being co-scheduled.
 External constraints such as agent attributes should be used to enforce such
 guarantees should they be needed.
 
+
 ### Container Objects
-
-*Note: Both Docker and Mesos unified-container support are currently EXPERIMENTAL.*
-*Note: In order to correctly execute processes inside a job, the Docker container must have python 2.7 installed.*
-
-*Note: For private docker registry, mesos mandates the docker credential file to be named as `.dockercfg`, even though docker may create a credential file with a different name on various platforms. Also, the `.dockercfg` file needs to be copied into the sandbox using the `-thermos_executor_resources` flag, specified while starting Aurora.*
 
 Describes the container the job's processes will run inside. If not using Docker or the Mesos
 unified-container, the container can be omitted from your job config.
 
   param          | type           | description
   -----          | :----:         | -----------
-  ```docker```   | Docker         | A docker container to use.
-  ```mesos```    | Mesos          | A mesos container to use.
-
-### Docker Object
-
-  param            | type            | description
-  -----            | :----:          | -----------
-  ```image```      | String          | The name of the docker image to execute.  If the image does not exist locally it will be pulled with ```docker pull```.
-  ```parameters``` | List(Parameter) | Additional parameters to pass to the docker containerizer.
-
-### Docker Parameter Object
-
-Docker CLI parameters. This needs to be enabled by the scheduler `allow_docker_parameters` option.
-See [Docker Command Line Reference](https://docs.docker.com/reference/commandline/run/) for valid parameters.
-
-  param            | type            | description
-  -----            | :----:          | -----------
-  ```name```       | String          | The name of the docker parameter. E.g. volume
-  ```value```      | String          | The value of the parameter. E.g. /usr/local/bin:/usr/bin:rw
+  ```mesos```    | Mesos          | A native Mesos container to use.
+  ```docker```   | Docker         | A Docker container to use (via Docker engine)
 
 ### Mesos Object
 
@@ -487,8 +470,6 @@ See [Docker Command Line Reference](https://docs.docker.com/reference/commandlin
   ```image```      | Choice(AppcImage, DockerImage) | An optional filesystem image to use within this container.
 
 ### AppcImage
-
-*Note: In order to correctly execute processes inside a job, the filesystem image must include python 2.7.*
 
 Describes an AppC filesystem image.
 
@@ -499,14 +480,34 @@ Describes an AppC filesystem image.
 
 ### DockerImage
 
-*Note: In order to correctly execute processes inside a job, the filesystem image must include python 2.7.*
-
 Describes a Docker filesystem image.
 
   param      | type   | description
   -----      | :----: | -----------
   ```name``` | String | The name of the docker image.
   ```tag```  | String | The tag that identifies the docker image.
+
+
+### Docker Object
+
+*Note: In order to correctly execute processes inside a job, the Docker container must have Python 2.7 installed.*
+*Note: For private docker registry, mesos mandates the docker credential file to be named as `.dockercfg`, even though docker may create a credential file with a different name on various platforms. Also, the `.dockercfg` file needs to be copied into the sandbox using the `-thermos_executor_resources` flag, specified while starting Aurora.*
+
+  param            | type            | description
+  -----            | :----:          | -----------
+  ```image```      | String          | The name of the docker image to execute.  If the image does not exist locally it will be pulled with ```docker pull```.
+  ```parameters``` | List(Parameter) | Additional parameters to pass to the Docker engine.
+
+### Docker Parameter Object
+
+Docker CLI parameters. This needs to be enabled by the scheduler `-allow_docker_parameters` option.
+See [Docker Command Line Reference](https://docs.docker.com/reference/commandline/run/) for valid parameters.
+
+  param            | type            | description
+  -----            | :----:          | -----------
+  ```name```       | String          | The name of the docker parameter. E.g. volume
+  ```value```      | String          | The value of the parameter. E.g. /usr/local/bin:/usr/bin:rw
+
 
 ### LifecycleConfig Objects
 

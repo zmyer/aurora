@@ -101,6 +101,12 @@ class TaskRunnerHelper(object):
 
       if process_uid == uid:
         return True
+      elif uid == 0:
+        # If the process was launched as root but is now not root, we should
+        # kill this because it could have called `setuid` on itself.
+        log.info("pid %s appears to be have launched by root but it's uid is now %s" % (
+            process.pid, process_uid))
+        return True
       else:
         log.info("Expected pid %s to be ours but the pid uid is %s and we're %s" % (
             process.pid, process_uid, uid))
@@ -211,6 +217,26 @@ class TaskRunnerHelper(object):
   def _get_coordinator_group(cls, state, process_name):
     assert process_name in state.processes and len(state.processes[process_name]) > 0
     return state.processes[process_name][-1].coordinator_pid
+
+  @classmethod
+  def terminate_orphans(cls, state):
+    """
+    Given the state, send SIGTERM to children that are orphaned processes.
+
+    The direct children of the runner will always be coordinators or orphans.
+    """
+    log.debug('TaskRunnerHelper.terminate_orphans()')
+    process_tree = cls.scan_tree(state)
+
+    coordinator_pids = {p[0] for p in process_tree.values() if p[0]}
+    children_pids = {c.pid for c in psutil.Process().children()}
+    orphaned_pids = children_pids - coordinator_pids
+
+    if len(orphaned_pids) > 0:
+      log.info("Orphaned pids detected: %s", orphaned_pids)
+      for p in orphaned_pids:
+        log.debug("SIGTERM pid %s", p)
+        cls.terminate_pid(p)
 
   @classmethod
   def terminate_process(cls, state, process_name):

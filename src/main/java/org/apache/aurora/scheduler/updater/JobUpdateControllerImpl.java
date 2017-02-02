@@ -23,7 +23,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
 import com.google.common.base.Optional;
-import com.google.common.base.Throwables;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -44,6 +43,8 @@ import org.apache.aurora.gen.JobUpdateQuery;
 import org.apache.aurora.gen.JobUpdateStatus;
 import org.apache.aurora.gen.Lock;
 import org.apache.aurora.gen.LockKey;
+import org.apache.aurora.scheduler.BatchWorker;
+import org.apache.aurora.scheduler.SchedulerModule.TaskEventBatchWorker;
 import org.apache.aurora.scheduler.base.InstanceKeys;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Query;
@@ -120,6 +121,7 @@ class JobUpdateControllerImpl implements JobUpdateController {
   private final Clock clock;
   private final PulseHandler pulseHandler;
   private final Lifecycle lifecycle;
+  private final TaskEventBatchWorker batchWorker;
 
   // Currently-active updaters. An active updater is one that is rolling forward or back. Paused
   // and completed updates are represented only in storage, not here.
@@ -134,7 +136,8 @@ class JobUpdateControllerImpl implements JobUpdateController {
       ScheduledExecutorService executor,
       StateManager stateManager,
       Clock clock,
-      Lifecycle lifecycle) {
+      Lifecycle lifecycle,
+      TaskEventBatchWorker batchWorker) {
 
     this.updateFactory = requireNonNull(updateFactory);
     this.lockManager = requireNonNull(lockManager);
@@ -143,6 +146,7 @@ class JobUpdateControllerImpl implements JobUpdateController {
     this.stateManager = requireNonNull(stateManager);
     this.clock = requireNonNull(clock);
     this.lifecycle = requireNonNull(lifecycle);
+    this.batchWorker = requireNonNull(batchWorker);
     this.pulseHandler = new PulseHandler(clock);
   }
 
@@ -168,9 +172,17 @@ class JobUpdateControllerImpl implements JobUpdateController {
       List<IJobUpdateSummary> activeJobUpdates =
           storeProvider.getJobUpdateStore().fetchJobUpdateSummaries(queryActiveByJob(job));
       if (!activeJobUpdates.isEmpty()) {
-        throw new UpdateStateException("An active update already exists for this job, "
+        if (activeJobUpdates.size() > 1) {
+          LOG.error("Multiple active updates exist for this job. {}", activeJobUpdates);
+          throw new UpdateStateException(
+              String.format("Multiple active updates exist for this job. %s", activeJobUpdates));
+        }
+
+        IJobUpdateSummary activeJobUpdate = activeJobUpdates.get(0);
+        throw new UpdateInProgressException("An active update already exists for this job, "
             + "please terminate it before starting another. "
-            + "Active updates are those in states " + Updates.ACTIVE_JOB_UPDATE_STATES);
+            + "Active updates are those in states " + Updates.ACTIVE_JOB_UPDATE_STATES,
+            activeJobUpdate);
       }
 
       LOG.info("Starting update for job " + job);
@@ -246,6 +258,13 @@ class JobUpdateControllerImpl implements JobUpdateController {
         Functions.compose(createAuditedEvent(auditData), Functions.constant(ABORTED)));
   }
 
+  @Override
+  public void rollback(IJobUpdateKey key, AuditData auditData) throws UpdateStateException {
+    unscopedChangeUpdateStatus(
+        key,
+        Functions.compose(createAuditedEvent(auditData), Functions.constant(ROLLING_BACK)));
+  }
+
   private static Function<JobUpdateStatus, JobUpdateEvent> createAuditedEvent(
       final AuditData auditData) {
 
@@ -274,7 +293,7 @@ class JobUpdateControllerImpl implements JobUpdateController {
           try {
             changeJobUpdateStatus(storeProvider, key, newEvent(status), false);
           } catch (UpdateStateException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
           }
         }
       }
@@ -331,7 +350,7 @@ class JobUpdateControllerImpl implements JobUpdateController {
   }
 
   private void instanceChanged(final IInstanceKey instance, final Optional<IScheduledTask> state) {
-    storage.write((NoResult.Quiet) storeProvider -> {
+    batchWorker.execute(storeProvider -> {
       IJobKey job = instance.getJobKey();
       UpdateFactory.Update update = updates.get(job);
       if (update != null) {
@@ -344,13 +363,14 @@ class JobUpdateControllerImpl implements JobUpdateController {
                 getOnlyMatch(storeProvider.getJobUpdateStore(), queryActiveByJob(job)),
                 ImmutableMap.of(instance.getInstanceId(), state));
           } catch (UpdateStateException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
           }
         } else {
           LOG.info("Instance " + instance + " is not part of active update for "
               + JobKeys.canonicalString(job));
         }
       }
+      return BatchWorker.NO_RESULT;
     });
   }
 
@@ -468,7 +488,7 @@ class JobUpdateControllerImpl implements JobUpdateController {
       if (action == ROLL_BACK) {
         updates.remove(job);
       } else {
-        checkState(!updates.containsKey(job), "Updater already exists for " + job);
+        checkState(!updates.containsKey(job), "Updater already exists for %s", job);
       }
 
       IJobUpdate jobUpdate = updateStore.fetchJobUpdate(key).get();
@@ -729,7 +749,7 @@ class JobUpdateControllerImpl implements JobUpdateController {
                           instance.getInstanceId())));
             } catch (UpdateStateException e) {
               LOG.error(String.format("Error running deferred evaluation for %s: %s", instance, e));
-              Throwables.propagate(e);
+              throw new RuntimeException(e);
             }
           }
         }));

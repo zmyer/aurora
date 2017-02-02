@@ -27,6 +27,7 @@ import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.common.util.testing.FakeClock;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
+import org.apache.aurora.scheduler.SchedulerModule.TaskEventBatchWorker;
 import org.apache.aurora.scheduler.async.DelayExecutor;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
@@ -37,6 +38,7 @@ import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
+import org.apache.aurora.scheduler.testing.FakeStatsProvider;
 import org.easymock.Capture;
 import org.easymock.EasyMock;
 import org.junit.After;
@@ -48,8 +50,11 @@ import static org.apache.aurora.gen.ScheduleStatus.KILLED;
 import static org.apache.aurora.gen.ScheduleStatus.LOST;
 import static org.apache.aurora.gen.ScheduleStatus.RUNNING;
 import static org.apache.aurora.gen.ScheduleStatus.STARTING;
+import static org.apache.aurora.scheduler.pruning.TaskHistoryPruner.TASKS_PRUNED;
+import static org.apache.aurora.scheduler.testing.BatchWorkerUtil.expectBatchExecute;
 import static org.easymock.EasyMock.eq;
 import static org.easymock.EasyMock.expectLastCall;
+import static org.junit.Assert.assertEquals;
 
 public class TaskHistoryPrunerTest extends EasyMockTest {
   private static final String SLAVE_HOST = "HOST_A";
@@ -66,22 +71,29 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
   private TaskHistoryPruner pruner;
   private Closer closer;
   private Command shutdownCommand;
+  private FakeStatsProvider statsProvider;
 
   @Before
-  public void setUp() {
+  public void setUp() throws Exception {
     executor = createMock(DelayExecutor.class);
     clock = new FakeClock();
     stateManager = createMock(StateManager.class);
     storageUtil = new StorageTestUtil(this);
     storageUtil.expectOperations();
     shutdownCommand = createMock(Command.class);
+    TaskEventBatchWorker batchWorker = createMock(TaskEventBatchWorker.class);
+    statsProvider = new FakeStatsProvider();
+    expectBatchExecute(batchWorker, storageUtil.storage, control).anyTimes();
+
     pruner = new TaskHistoryPruner(
         executor,
         stateManager,
         clock,
         new HistoryPrunnerSettings(ONE_DAY, ONE_MINUTE, PER_JOB_HISTORY),
         storageUtil.storage,
-        new Lifecycle(shutdownCommand));
+        new Lifecycle(shutdownCommand),
+        batchWorker,
+        statsProvider);
     closer = Closer.create();
   }
 
@@ -140,9 +152,11 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
 
     control.replay();
 
+    assertEquals(0L, statsProvider.getValue(TASKS_PRUNED));
     for (IScheduledTask task : ImmutableList.of(a, b, c, d, e)) {
       pruner.recordStateChange(TaskStateChange.initialized(task));
     }
+    assertEquals(2L, statsProvider.getValue(TASKS_PRUNED));
   }
 
   @Test
@@ -178,8 +192,10 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
     // Capture future for inactive task "a"
     changeState(running, killed);
     clock.advance(ONE_HOUR);
+    assertEquals(0L, statsProvider.getValue(TASKS_PRUNED));
     // Execute future to prune task "a" from the system.
     delayedDelete.getValue().run();
+    assertEquals(1L, statsProvider.getValue(TASKS_PRUNED));
   }
 
   @Test
@@ -228,7 +244,9 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
     changeState(a, aKilled);
     changeState(b, bKilled);
     changeState(c, cLost);
+    assertEquals(0L, statsProvider.getValue(TASKS_PRUNED));
     changeState(d, dLost);
+    assertEquals(2L, statsProvider.getValue(TASKS_PRUNED));
   }
 
   @Test
@@ -247,7 +265,9 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
 
     changeState(running, killed);
     clock.advance(ONE_HOUR);
+    assertEquals(0L, statsProvider.getValue(TASKS_PRUNED));
     delayedDelete.getValue().run();
+    assertEquals(0L, statsProvider.getValue(TASKS_PRUNED));
   }
 
   private void expectDeleteTasks(String... tasks) {

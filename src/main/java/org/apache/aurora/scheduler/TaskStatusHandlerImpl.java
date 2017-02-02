@@ -28,7 +28,7 @@ import com.google.common.base.Optional;
 import com.google.common.util.concurrent.AbstractExecutionThreadService;
 import com.google.common.util.concurrent.MoreExecutors;
 
-import org.apache.aurora.common.stats.Stats;
+import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.scheduler.base.Conversions;
 import org.apache.aurora.scheduler.mesos.Driver;
@@ -62,8 +62,6 @@ public class TaskStatusHandlerImpl extends AbstractExecutionThreadService
   @VisibleForTesting
   static final String DISK_LIMIT_DISPLAY = "Task used more disk than requested.";
 
-  private static final String STATUS_STAT_FORMAT = "status_update_%s_%s";
-
   private final Storage storage;
   private final StateManager stateManager;
   private final Driver driver;
@@ -93,6 +91,7 @@ public class TaskStatusHandlerImpl extends AbstractExecutionThreadService
   TaskStatusHandlerImpl(
       Storage storage,
       StateManager stateManager,
+      StatsProvider statsProvider,
       final Driver driver,
       @StatusUpdateQueue BlockingQueue<TaskStatus> pendingUpdates,
       @MaxBatchSize Integer maxBatchSize,
@@ -104,8 +103,9 @@ public class TaskStatusHandlerImpl extends AbstractExecutionThreadService
     this.pendingUpdates = requireNonNull(pendingUpdates);
     this.maxBatchSize = requireNonNull(maxBatchSize);
     this.counters = requireNonNull(counters);
+    requireNonNull(statsProvider);
 
-    Stats.exportSize("status_updates_queue_size", this.pendingUpdates);
+    statsProvider.exportSize("status_updates_queue_size", this.pendingUpdates);
 
     addListener(
         new Listener() {
@@ -179,7 +179,7 @@ public class TaskStatusHandlerImpl extends AbstractExecutionThreadService
 
   @VisibleForTesting
   static String statName(TaskStatus status, StateChangeResult result) {
-    return String.format(STATUS_STAT_FORMAT, status.getReason(), result);
+    return "status_update_" + status.getReason() + "_" + result;
   }
 
   private static Optional<String> formatMessage(TaskStatus status) {

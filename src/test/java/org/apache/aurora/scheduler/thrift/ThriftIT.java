@@ -94,7 +94,7 @@ public class ThriftIT extends EasyMockTest {
             install(DbModule.testModule());
             install(new QuotaModule());
             install(new CronModule());
-            install(new TierModule(TaskTestUtil.DEV_TIER_CONFIG));
+            install(new TierModule(TaskTestUtil.TIER_CONFIG));
             bind(ExecutorSettings.class).toInstance(TestExecutorSettings.THERMOS_EXECUTOR);
 
             install(new AppModule(configurationManagerSettings));
@@ -154,6 +154,9 @@ public class ThriftIT extends EasyMockTest {
         ImmutableSet.of(_Fields.DOCKER),
         true,
         ImmutableMultimap.of(),
+        false,
+        true,
+        true,
         false);
 
     createThrift(configurationManagerSettings);
@@ -163,6 +166,7 @@ public class ThriftIT extends EasyMockTest {
     TaskConfig task = TaskTestUtil.makeConfig(TaskTestUtil.JOB).newBuilder();
     task.unsetExecutorConfig();
     task.setProduction(false)
+        .setTier(TaskTestUtil.DEV_TIER_NAME)
         .setContainer(Container.docker(new DockerContainer()
             .setImage("image")
             .setParameters(

@@ -120,10 +120,20 @@
   <resultMap id="containerMap" type="org.apache.aurora.scheduler.storage.db.views.DbContainer">
     <association property="docker" resultMap="dockerContainerMap" />
     <association property="image" columnPrefix="image_" resultMap="imageMap" />
+    <collection property="volumes" columnPrefix="volume_" resultMap="volumeMap" notNullColumn="id" />
   </resultMap>
 
   <resultMap id="metadataMap" type="org.apache.aurora.gen.Metadata">
     <id column="id" />
+  </resultMap>
+
+  <resultMap id="mesosFetcherUrisMap" type="org.apache.aurora.gen.MesosFetcherURI">
+    <id column="id" />
+  </resultMap>
+
+  <resultMap id="volumeMap" type="org.apache.aurora.gen.Volume">
+    <id column="id" />
+    <result property="mode" column="mode" typeHandler="org.apache.aurora.scheduler.storage.db.typehandlers.VolumeModeTypeHandler" />
   </resultMap>
 
   <resultMap id="resourceMap" type="org.apache.aurora.scheduler.storage.db.views.DBResource">
@@ -151,6 +161,7 @@
       <result column="port_name" />
     </collection>
     <collection property="metadata" resultMap="metadataMap" columnPrefix="m_"/>
+    <collection property="mesosFetcherUris" resultMap="mesosFetcherUrisMap" columnPrefix="u_"/>
     <collection
         property="taskLinks"
         select="selectTaskLinks"
@@ -188,10 +199,18 @@
       m.id AS m_id,
       m.key AS m_key,
       m.value AS m_value,
+      u.id AS u_id,
+      u.value AS u_value,
+      u.extract AS u_extract,
+      u.cache AS u_cache,
       di.name as c_image_docker_name,
       di.tag as c_image_docker_tag,
       ai.name as c_image_appc_name,
       ai.image_id as c_image_appc_image_id,
+      v.id as c_volume_id,
+      v.host_path as c_volume_host_path,
+      v.container_path as c_volume_container_path,
+      v.mode as c_volume_mode,
       tc.id AS constraint_id,
       tc.name AS constraint_name,
       tlc.id AS constraint_l_id,
@@ -204,8 +223,10 @@
     LEFT OUTER JOIN task_config_requested_ports AS p ON p.task_config_id = c.id
     LEFT OUTER JOIN task_config_docker_containers AS d ON d.task_config_id = c.id
     LEFT OUTER JOIN task_config_metadata AS m ON m.task_config_id = c.id
+    LEFT OUTER JOIN task_config_mesos_fetcher_uris AS u ON u.task_config_id = c.id
     LEFT OUTER JOIN task_config_docker_images AS di ON di.task_config_id = c.id
     LEFT OUTER JOIN task_config_appc_images AS ai ON ai.task_config_id = c.id
+    LEFT OUTER JOIN task_config_volumes AS v ON v.task_config_id = c.id
     LEFT OUTER JOIN task_constraints AS tc ON tc.task_config_id = c.id
     LEFT OUTER JOIN limit_constraints as tlc ON tlc.constraint_id = tc.id
     LEFT OUTER JOIN value_constraints as tvc ON tvc.constraint_id = tc.id
@@ -389,6 +410,38 @@
       #{configId},
       #{entry.key},
       #{entry.value}
+    </foreach>
+    )
+  </insert>
+
+  <insert id="insertMesosFetcherUris">
+    INSERT INTO task_config_mesos_fetcher_uris (
+      task_config_id,
+      value,
+      extract,
+      cache
+    ) VALUES (
+    <foreach item="entry" collection="uris" separator="),(">
+      #{configId},
+      #{entry.value},
+      #{entry.extract},
+      #{entry.cache}
+    </foreach>
+    )
+  </insert>
+
+  <insert id="insertVolumes">
+    INSERT INTO task_config_volumes (
+      task_config_id,
+      host_path,
+      container_path,
+      mode
+    ) VALUES (
+    <foreach item="volume" collection="volumes" separator="),(">
+      #{configId},
+      #{volume.hostPath},
+      #{volume.containerPath},
+      #{volume.mode, typeHandler=org.apache.aurora.scheduler.storage.db.typehandlers.VolumeModeTypeHandler}
     </foreach>
     )
   </insert>

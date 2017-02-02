@@ -74,8 +74,8 @@ class FastStatusManager(StatusManager):
 
 
 class DefaultTestSandboxProvider(SandboxProvider):
-  def from_assigned_task(self, assigned_task):
-    return DirectorySandbox(safe_mkdtemp())
+  def from_assigned_task(self, assigned_task, **kwargs):
+    return DirectorySandbox(safe_mkdtemp(), **kwargs)
 
 
 class FailingStartingTaskRunner(ThermosTaskRunner):
@@ -84,7 +84,7 @@ class FailingStartingTaskRunner(ThermosTaskRunner):
 
 
 class FailingSandbox(DirectorySandbox):
-  def __init__(self, root, exception_type):
+  def __init__(self, root, exception_type, **kwargs):
     self._exception_type = exception_type
     super(FailingSandbox, self).__init__(root)
 
@@ -96,8 +96,21 @@ class FailingSandboxProvider(SandboxProvider):
   def __init__(self, exception_type=DirectorySandbox.CreationError):
     self._exception_type = exception_type
 
-  def from_assigned_task(self, assigned_task):
-    return FailingSandbox(safe_mkdtemp(), exception_type=self._exception_type)
+  def from_assigned_task(self, assigned_task, **kwargs):
+    return FailingSandbox(safe_mkdtemp(), exception_type=self._exception_type, **kwargs)
+
+
+class FileSystemImageTestSandboxProvider(SandboxProvider):
+  class FileSystemImageSandboxTest(DirectorySandbox):
+    def create(self):
+      pass
+
+    @property
+    def is_filesystem_image(self):
+      return True
+
+  def from_assigned_task(self, assigned_task, **kwargs):
+    return self.FileSystemImageSandboxTest(safe_mkdtemp())
 
 
 class SlowSandbox(DirectorySandbox):
@@ -115,8 +128,8 @@ class SlowSandbox(DirectorySandbox):
 
 
 class SlowSandboxProvider(SandboxProvider):
-  def from_assigned_task(self, assigned_task):
-    return SlowSandbox(safe_mkdtemp())
+  def from_assigned_task(self, assigned_task, **kwargs):
+    return SlowSandbox(safe_mkdtemp(), **kwargs)
 
 
 class ProxyDriver(object):
@@ -188,11 +201,12 @@ def thermos_runner_path(build=True):
   return thermos_runner_path.value
 
 
-def make_provider(checkpoint_root, runner_class=ThermosTaskRunner):
+def make_provider(checkpoint_root, runner_class=ThermosTaskRunner, mesos_containerizer_path=None):
   return DefaultThermosTaskRunnerProvider(
       pex_location=thermos_runner_path(),
       checkpoint_root=checkpoint_root,
       task_runner_class=runner_class,
+      mesos_containerizer_path=mesos_containerizer_path
   )
 
 
@@ -203,7 +217,8 @@ def make_executor(
     ports={},
     fast_status=False,
     runner_class=ThermosTaskRunner,
-    status_providers=()):
+    status_providers=[HealthCheckerProvider()],
+    assert_task_is_running=True):
 
   status_manager_class = FastStatusManager if fast_status else StatusManager
   runner_provider = make_provider(checkpoint_root, runner_class)
@@ -228,14 +243,16 @@ def make_executor(
   assert len(updates) == 2
   status_updates = [arg_tuple[0][0] for arg_tuple in updates]
   assert status_updates[0].state == mesos_pb2.TASK_STARTING
-  assert status_updates[1].state == mesos_pb2.TASK_RUNNING
 
-  # wait for the runner to bind to a task
-  while True:
-    runner = TaskRunner.get(task_description.task_id.value, checkpoint_root)
-    if runner:
-      break
-    time.sleep(0.1)
+  runner = None
+  if assert_task_is_running:
+    assert status_updates[1].state == mesos_pb2.TASK_RUNNING
+    # wait for the runner to bind to a task
+    while True:
+      runner = TaskRunner.get(task_description.task_id.value, checkpoint_root)
+      if runner:
+        break
+      time.sleep(0.1)
 
   assert te.launched.is_set()
   return runner, te
@@ -304,7 +321,8 @@ class TestThermosExecutor(object):
     with temporary_dir() as tempdir:
       te = AuroraExecutor(
           runner_provider=make_provider(tempdir),
-          sandbox_provider=DefaultTestSandboxProvider())
+          sandbox_provider=DefaultTestSandboxProvider(),
+          status_providers=[HealthCheckerProvider()])
       te.launchTask(proxy_driver, make_task(HELLO_WORLD_MTI))
       te.terminated.wait()
       tm = TaskMonitor(tempdir, task_id=HELLO_WORLD_TASK_ID)
@@ -326,7 +344,8 @@ class TestThermosExecutor(object):
     with temporary_dir() as tempdir:
       te = AuroraExecutor(
           runner_provider=make_provider(tempdir),
-          sandbox_provider=DefaultTestSandboxProvider())
+          sandbox_provider=DefaultTestSandboxProvider(),
+          status_providers=[HealthCheckerProvider()])
       te.launchTask(proxy_driver, make_task(MESOS_JOB(task=HELLO_WORLD), instanceId=0))
       te.runner_started.wait()
       while te._status_manager is None:
@@ -434,11 +453,12 @@ class TestThermosExecutor(object):
             MESOS_JOB(task=SLEEP60, health_check_config=health_check_config),
             ports={'health': port},
             fast_status=True,
-            status_providers=(HealthCheckerProvider(),))
+            status_providers=(HealthCheckerProvider(),),
+            assert_task_is_running=False)
         executor.terminated.wait()
 
     updates = proxy_driver.method_calls['sendStatusUpdate']
-    assert len(updates) == 3
+    assert len(updates) == 2
     assert updates[-1][0][0].state == mesos_pb2.TASK_FAILED
 
   def test_task_health_ok(self):
@@ -571,6 +591,72 @@ class TestThermosExecutor(object):
     assert len(updates) == 2
     assert updates[0][0][0].state == mesos_pb2.TASK_STARTING
     assert updates[1][0][0].state == mesos_pb2.TASK_FAILED
+
+  def test_filesystem_image_assign_no_containerizer(self):
+    proxy_driver = ProxyDriver()
+
+    with temporary_dir() as tempdir:
+      te = FastThermosExecutor(
+        runner_provider=make_provider(tempdir, mesos_containerizer_path=None),
+        sandbox_provider=FileSystemImageTestSandboxProvider())
+      te.launchTask(proxy_driver, make_task(HELLO_WORLD_MTI))
+
+      te.SANDBOX_INITIALIZATION_TIMEOUT = Amount(1, Time.MILLISECONDS)
+      te.START_TIMEOUT = Amount(10, Time.MILLISECONDS)
+      te.STOP_TIMEOUT = Amount(10, Time.MILLISECONDS)
+
+      proxy_driver.wait_stopped()
+
+      updates = proxy_driver.method_calls['sendStatusUpdate']
+      assert len(updates) == 2
+      assert updates[0][0][0].state == mesos_pb2.TASK_STARTING
+      assert updates[1][0][0].state == mesos_pb2.TASK_FAILED
+
+  def test_filesystem_image_assign_missing_containerizer(self):
+    proxy_driver = ProxyDriver()
+
+    with temporary_dir() as tempdir:
+      te = FastThermosExecutor(
+        runner_provider=make_provider(tempdir, mesos_containerizer_path='/doesnotexist'),
+        sandbox_provider=FileSystemImageTestSandboxProvider())
+      te.launchTask(proxy_driver, make_task(HELLO_WORLD_MTI))
+
+      te.SANDBOX_INITIALIZATION_TIMEOUT = Amount(1, Time.MILLISECONDS)
+      te.START_TIMEOUT = Amount(10, Time.MILLISECONDS)
+      te.STOP_TIMEOUT = Amount(10, Time.MILLISECONDS)
+
+      proxy_driver.wait_stopped()
+
+      updates = proxy_driver.method_calls['sendStatusUpdate']
+      assert len(updates) == 2
+      assert updates[0][0][0].state == mesos_pb2.TASK_STARTING
+      assert updates[1][0][0].state == mesos_pb2.TASK_FAILED
+
+  def test_filesystem_image_containerizer_not_executable(self):
+    proxy_driver = ProxyDriver()
+
+    with temporary_dir() as tempdir:
+
+      tempfile = os.path.join(tempdir, 'fake-containierizer')
+      with open(tempfile, 'a'):
+        os.utime(tempfile, None)
+
+      te = FastThermosExecutor(
+        runner_provider=make_provider(tempdir, mesos_containerizer_path=tempfile),
+        sandbox_provider=FileSystemImageTestSandboxProvider())
+
+      te.SANDBOX_INITIALIZATION_TIMEOUT = Amount(1, Time.MILLISECONDS)
+      te.START_TIMEOUT = Amount(10, Time.MILLISECONDS)
+      te.STOP_TIMEOUT = Amount(10, Time.MILLISECONDS)
+
+      te.launchTask(proxy_driver, make_task(HELLO_WORLD_MTI))
+
+      proxy_driver.wait_stopped()
+
+      updates = proxy_driver.method_calls['sendStatusUpdate']
+      assert len(updates) == 2
+      assert updates[0][0][0].state == mesos_pb2.TASK_STARTING
+      assert updates[1][0][0].state == mesos_pb2.TASK_FAILED
 
 
 def test_waiting_executor():

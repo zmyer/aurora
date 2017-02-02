@@ -40,6 +40,7 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.Sets;
 
+import org.apache.aurora.GuavaUtils;
 import org.apache.aurora.common.base.MorePreconditions;
 import org.apache.aurora.gen.ConfigGroup;
 import org.apache.aurora.gen.ConfigSummary;
@@ -50,6 +51,7 @@ import org.apache.aurora.gen.GetJobUpdateSummariesResult;
 import org.apache.aurora.gen.GetJobsResult;
 import org.apache.aurora.gen.GetPendingReasonResult;
 import org.apache.aurora.gen.GetQuotaResult;
+import org.apache.aurora.gen.GetTierConfigResult;
 import org.apache.aurora.gen.JobConfiguration;
 import org.apache.aurora.gen.JobKey;
 import org.apache.aurora.gen.JobSummary;
@@ -69,6 +71,8 @@ import org.apache.aurora.gen.ScheduleStatusResult;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskQuery;
+import org.apache.aurora.gen.TierConfig;
+import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Jobs;
 import org.apache.aurora.scheduler.base.Query;
@@ -104,6 +108,7 @@ import static org.apache.aurora.gen.ResponseCode.INVALID_REQUEST;
 import static org.apache.aurora.scheduler.base.Numbers.convertRanges;
 import static org.apache.aurora.scheduler.base.Numbers.toRanges;
 import static org.apache.aurora.scheduler.resources.ResourceManager.aggregateFromBag;
+import static org.apache.aurora.scheduler.thrift.Responses.addMessage;
 import static org.apache.aurora.scheduler.thrift.Responses.error;
 import static org.apache.aurora.scheduler.thrift.Responses.invalidRequest;
 import static org.apache.aurora.scheduler.thrift.Responses.ok;
@@ -119,6 +124,7 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
   private final NearestFit nearestFit;
   private final CronPredictor cronPredictor;
   private final QuotaManager quotaManager;
+  private final TierManager tierManager;
 
   @Inject
   ReadOnlySchedulerImpl(
@@ -126,13 +132,15 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
       Storage storage,
       NearestFit nearestFit,
       CronPredictor cronPredictor,
-      QuotaManager quotaManager) {
+      QuotaManager quotaManager,
+      TierManager tierManager) {
 
     this.configurationManager = requireNonNull(configurationManager);
     this.storage = requireNonNull(storage);
     this.nearestFit = requireNonNull(nearestFit);
     this.cronPredictor = requireNonNull(cronPredictor);
     this.quotaManager = requireNonNull(quotaManager);
+    this.tierManager = requireNonNull(tierManager);
   }
 
   @Override
@@ -308,14 +316,30 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
   }
 
   @Override
-  public Response getJobUpdateDetails(JobUpdateKey mutableKey) {
+  public Response getJobUpdateDetails(JobUpdateKey mutableKey, JobUpdateQuery mutableQuery) {
+    if (mutableKey == null && mutableQuery == null)  {
+      return error("Either key or query must be set.");
+    }
+
+    if (mutableQuery != null) {
+      IJobUpdateQuery query = IJobUpdateQuery.build(mutableQuery);
+
+      List<IJobUpdateDetails> details = storage.read(storeProvider ->
+          storeProvider.getJobUpdateStore().fetchJobUpdateDetails(query));
+
+      return ok(Result.getJobUpdateDetailsResult(new GetJobUpdateDetailsResult()
+          .setDetailsList(IJobUpdateDetails.toBuildersList(details))));
+    }
+
+    // TODO(zmanji): Remove this code once `mutableKey` is removed in AURORA-1765
     IJobUpdateKey key = IJobUpdateKey.build(mutableKey);
-    Optional<IJobUpdateDetails> details =
-        storage.read(storeProvider -> storeProvider.getJobUpdateStore().fetchJobUpdateDetails(key));
+    Optional<IJobUpdateDetails> details = storage.read(storeProvider ->
+        storeProvider.getJobUpdateStore().fetchJobUpdateDetails(key));
 
     if (details.isPresent()) {
-      return ok(Result.getJobUpdateDetailsResult(
-          new GetJobUpdateDetailsResult().setDetails(details.get().newBuilder())));
+      return addMessage(ok(Result.getJobUpdateDetailsResult(
+          new GetJobUpdateDetailsResult().setDetails(details.get().newBuilder()))),
+          "The key argument is deprecated, use the query argument instead");
     } else {
       return invalidRequest("Invalid update: " + key);
     }
@@ -366,6 +390,18 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
           .setUpdate(instancesToConfigGroups(update))
           .setUnchanged(instancesToConfigGroups(diff.getUnchangedInstances()))));
     });
+  }
+
+  @Override
+  public Response getTierConfigs() throws TException {
+    return ok(Result.getTierConfigResult(
+        new GetTierConfigResult(
+            tierManager.getDefaultTierName(),
+            tierManager.getTiers()
+                .entrySet()
+                .stream()
+                .map(entry -> new TierConfig(entry.getKey(), entry.getValue().toMap()))
+                .collect(GuavaUtils.toImmutableSet()))));
   }
 
   private static Set<ConfigGroup> instancesToConfigGroups(Map<Integer, ITaskConfig> tasks) {

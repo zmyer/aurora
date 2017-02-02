@@ -18,13 +18,13 @@ import java.util.Map;
 import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.codehaus.jackson.annotate.JsonCreator;
 import org.codehaus.jackson.annotate.JsonProperty;
 
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -42,18 +42,46 @@ public interface TierManager {
    */
   TierInfo getTier(ITaskConfig taskConfig);
 
+  /**
+   * Gets name of the default tier.
+   *
+   * @return Name for the default tier.
+   */
+  String getDefaultTierName();
+
+  /**
+   * Gets the map of tier name to {@link TierInfo} instance.
+   *
+   * @return A readonly view of all tiers.
+   */
+  Map<String, TierInfo> getTiers();
+
   class TierManagerImpl implements TierManager {
     private final TierConfig tierConfig;
 
     @VisibleForTesting
     public static class TierConfig {
+      private final String defaultTier;
       private final Map<String, TierInfo> tiers;
 
       @VisibleForTesting
       @JsonCreator
-      public TierConfig(@JsonProperty("tiers") Map<String, TierInfo> tiers) {
+      public TierConfig(
+          @JsonProperty("default") String defaultTier,
+          @JsonProperty("tiers") Map<String, TierInfo> tiers) {
+
+        checkArgument(!Strings.isNullOrEmpty(defaultTier), "Default tier name cannot be empty.");
         checkArgument(!tiers.isEmpty(), "Tiers cannot be empty.");
+        checkArgument(
+            tiers.containsKey(defaultTier),
+            "Default tier name should match supplied tiers.");
+        this.defaultTier = defaultTier;
         this.tiers = ImmutableMap.copyOf(tiers);
+      }
+
+      @VisibleForTesting
+      public String getDefault() {
+        return defaultTier;
       }
 
       @VisibleForTesting
@@ -62,8 +90,9 @@ public interface TierManager {
       }
     }
 
+    @VisibleForTesting
     @Inject
-    TierManagerImpl(TierConfig tierConfig) {
+    public TierManagerImpl(TierConfig tierConfig) {
       this.tierConfig = requireNonNull(tierConfig);
     }
 
@@ -71,16 +100,19 @@ public interface TierManager {
     public TierInfo getTier(ITaskConfig taskConfig) {
       checkArgument(
           !taskConfig.isSetTier() || tierConfig.tiers.containsKey(taskConfig.getTier()),
-          format("Invalid tier '%s' in TaskConfig.", taskConfig.getTier()));
+          "Invalid tier '%s' in TaskConfig.", taskConfig.getTier());
 
-      return taskConfig.isSetTier()
-          ? tierConfig.tiers.get(taskConfig.getTier())
-          : tierConfig.getTiers().values().stream()
-              // Backward compatibility mode until tier is required in TaskConfig (AURORA-1624).
-              .filter(v -> v.isPreemptible() == !taskConfig.isProduction() && !v.isRevocable())
-              .findFirst()
-              .orElseThrow(() -> new IllegalStateException(
-                  format("No matching implicit tier for task of job %s", taskConfig.getJob())));
+      return tierConfig.tiers.get(taskConfig.getTier());
+    }
+
+    @Override
+    public String getDefaultTierName() {
+      return tierConfig.defaultTier;
+    }
+
+    @Override
+    public Map<String, TierInfo> getTiers() {
+      return tierConfig.tiers;
     }
   }
 }

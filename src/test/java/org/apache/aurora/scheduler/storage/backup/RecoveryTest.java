@@ -81,7 +81,7 @@ public class RecoveryTest extends EasyMockTest {
     shutDownNow = createMock(Command.class);
     ScheduledExecutorService executor = createMock(ScheduledExecutorService.class);
     clock = FakeScheduledExecutor.scheduleExecutor(executor);
-    TemporaryStorageFactory factory = new TemporaryStorageFactory();
+    TemporaryStorageFactory factory = new TemporaryStorageFactory(TaskTestUtil.THRIFT_BACKFILL);
     storageBackup = new StorageBackupImpl(
         snapshotStore,
         clock,
@@ -170,12 +170,8 @@ public class RecoveryTest extends EasyMockTest {
             FakeBuildInfo.GIT_TAG, FakeBuildInfo.GIT_TAG));
 
     return new Snapshot()
-        .setHostAttributes(ImmutableSet.of())
         .setCronJobs(ImmutableSet.of())
         .setSchedulerMetadata(metadata)
-        .setQuotaConfigurations(ImmutableSet.of())
-        .setTasks(IScheduledTask.toBuildersSet(ImmutableSet.copyOf(tasks)))
-        .setLocks(ImmutableSet.of())
-        .setJobUpdateDetails(ImmutableSet.of());
+        .setTasks(IScheduledTask.toBuildersSet(ImmutableSet.copyOf(tasks)));
   }
 }

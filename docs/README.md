@@ -20,6 +20,7 @@ Description of important Aurora features.
 
  * [Containers](features/containers.md)
  * [Cron Jobs](features/cron-jobs.md)
+ * [Custom Executors](features/custom-executors.md)
  * [Job Updates](features/job-updates.md)
  * [Multitenancy](features/multitenancy.md)
  * [Resource Isolation](features/resource-isolation.md)
@@ -27,6 +28,7 @@ Description of important Aurora features.
  * [Services](features/services.md)
  * [Service Discovery](features/service-discovery.md)
  * [SLA Metrics](features/sla-metrics.md)
+ * [Webhooks](features/webhooks.md)
 
 ## Operators
 For those that wish to manage and fine-tune an Aurora cluster.

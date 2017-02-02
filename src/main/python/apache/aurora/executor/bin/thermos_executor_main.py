@@ -15,7 +15,7 @@
 """Command-line entry point to the Thermos Executor
 
 This module wraps the Thermos Executor into an executable suitable for launching by a Mesos
-slave.
+agent.
 
 """
 
@@ -42,7 +42,7 @@ from apache.aurora.executor.thermos_task_runner import (
 )
 
 try:
-  from mesos.native import MesosExecutorDriver
+  from mesos.executor import MesosExecutorDriver
 except ImportError:
   print(traceback.format_exc(), file=sys.stderr)
   MesosExecutorDriver = None
@@ -54,9 +54,6 @@ app.configure(debug=True)
 LogOptions.set_simple(True)
 LogOptions.set_disk_log_level('DEBUG')
 LogOptions.set_log_dir(CWD)
-
-_LOGGER_DESTINATIONS = ', '.join(LoggerDestination.VALUES)
-_LOGGER_MODES = ', '.join(LoggerMode.VALUES)
 
 
 app.add_option(
@@ -88,8 +85,7 @@ app.add_option(
     type=str,
     default=None,
     help='Set hostname to be announced. By default it is'
-         'the --hostname argument passed into the mesos slave'
-)
+         'the --hostname argument passed into the Mesos agent.')
 
 app.add_option(
     '--announcer-zookeeper-auth-config',
@@ -97,6 +93,41 @@ app.add_option(
     type=str,
     default=None,
     help='Path to ZooKeeper authentication to use for announcer nodes.')
+
+app.add_option(
+    '--mesos-containerizer-path',
+    dest='mesos_containerizer_path',
+    type=str,
+    help='The path to the mesos-containerizer executable that will be used to isolate the task''s '
+         'filesystem when using a filesystem image. Note: this path should match the value of the '
+         'Mesos Agent''s -launcher_dir flag.',
+    default='/usr/libexec/mesos/mesos-containerizer')
+
+
+app.add_option(
+    '--no-create-user',
+    dest='no_create_user',
+    action='store_true',
+    help='If set, the executor will not attempt to create the task''s user/group under the '
+         'filesystem image (only applicable when launching a task with a filesystem image).',
+    default=False)
+
+
+# Ideally we'd just be able to use the value of the MESOS_SANDBOX environment variable to get this
+# directly from Mesos. Unfortunately, our method of isolating the task's filesystem does not involve
+# setting a ContainerInfo on the task, but instead mounts the task's filesystem as a Volume with an
+# Image set. In practice this means the value of MESOS_SANDBOX matches the value of the
+# MESOS_DIRECTORY environment variable.
+app.add_option(
+    '--sandbox-mount-point',
+    dest='sandbox_mount_point',
+    type=str,
+    help='The path under the task''s filesystem where the sandbox directory should be mounted '
+         '(only applicable when launching a task with a filesystem image). Note: for '
+         'consistency, this path should match the value of the Mesos Agent''s '
+         '-sandbox_directory flag.',
+    default='/mnt/mesos/sandbox')
+
 
 app.add_option(
     '--execute-as-user',
@@ -118,25 +149,22 @@ app.add_option(
     dest='nosetuid_health_checks',
     action="store_true",
     help='If set, the executor will not run shell health checks as job\'s role\'s user',
-    default=False
-)
+    default=False)
 
 
 app.add_option(
     '--runner-logger-destination',
     dest='runner_logger_destination',
-    type=str,
-    default='file',
-    help='The logger destination [%s] to use for all processes run by thermos.'
-      % _LOGGER_DESTINATIONS)
+    choices=LoggerDestination.VALUES,
+    help='The logger destination %r to use for all processes run by thermos.'
+      % (LoggerDestination.VALUES,))
 
 
 app.add_option(
     '--runner-logger-mode',
     dest='runner_logger_mode',
-    type=str,
-    default=None,
-    help='The logger mode [%s] to use for all processes run by thermos.' % _LOGGER_MODES)
+    choices=LoggerMode.VALUES,
+    help='The logger mode %r to use for all processes run by thermos.' % (LoggerMode.VALUES,))
 
 
 app.add_option(
@@ -190,7 +218,9 @@ def initialize(options):
 
   # status providers:
   status_providers = [
-      HealthCheckerProvider(nosetuid_health_checks=options.nosetuid_health_checks),
+      HealthCheckerProvider(
+          nosetuid_health_checks=options.nosetuid_health_checks,
+          mesos_containerizer_path=options.mesos_containerizer_path),
       ResourceManagerProvider(checkpoint_root=checkpoint_root)
   ]
 
@@ -214,14 +244,17 @@ def initialize(options):
       process_logger_mode=options.runner_logger_mode,
       rotate_log_size_mb=options.runner_rotate_log_size_mb,
       rotate_log_backups=options.runner_rotate_log_backups,
-      preserve_env=options.preserve_env
+      preserve_env=options.preserve_env,
+      mesos_containerizer_path=options.mesos_containerizer_path
     )
     thermos_runner_provider.set_role(None)
 
     thermos_executor = AuroraExecutor(
       runner_provider=thermos_runner_provider,
       status_providers=status_providers,
-      sandbox_provider=UserOverrideDirectorySandboxProvider(options.execute_as_user)
+      sandbox_provider=UserOverrideDirectorySandboxProvider(options.execute_as_user),
+      no_sandbox_create_user=options.no_create_user,
+      sandbox_mount_point=options.sandbox_mount_point
     )
   else:
     thermos_runner_provider = DefaultThermosTaskRunnerProvider(
@@ -232,12 +265,15 @@ def initialize(options):
       process_logger_mode=options.runner_logger_mode,
       rotate_log_size_mb=options.runner_rotate_log_size_mb,
       rotate_log_backups=options.runner_rotate_log_backups,
-      preserve_env=options.preserve_env
+      preserve_env=options.preserve_env,
+      mesos_containerizer_path=options.mesos_containerizer_path
     )
 
     thermos_executor = AuroraExecutor(
       runner_provider=thermos_runner_provider,
-      status_providers=status_providers
+      status_providers=status_providers,
+      no_sandbox_create_user=options.no_create_user,
+      sandbox_mount_point=options.sandbox_mount_point
     )
 
   return thermos_executor

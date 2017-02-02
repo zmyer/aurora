@@ -30,10 +30,12 @@ from apache.aurora.client.cli import (
 from apache.aurora.client.cli.diff_formatter import DiffFormatter
 from apache.aurora.client.cli.options import TaskInstanceKey
 from apache.aurora.client.cli.update import (
+    CLIENT_UPDATE_ID,
     AbortUpdate,
     ListUpdates,
     PauseUpdate,
     ResumeUpdate,
+    RollbackUpdate,
     StartUpdate,
     UpdateFilter,
     UpdateInfo,
@@ -59,6 +61,7 @@ from gen.apache.aurora.api.ttypes import (
     JobUpdateState,
     JobUpdateStatus,
     JobUpdateSummary,
+    Metadata,
     Response,
     ResponseCode,
     ResponseDetail,
@@ -121,9 +124,82 @@ class TestStartUpdate(AuroraClientCommandTest):
         self._command.execute(self._fake_context)
 
     assert self._mock_api.start_job_update.mock_calls == [
-        call(mock_config, None, self._mock_options.instance_spec.instance)
+        call(mock_config, None, self._mock_options.instance_spec.instance, ANY)
     ]
     self.assert_lock_message(self._fake_context)
+
+  def test_start_update_invalid_request(self):
+    mock_config = self.create_mock_config()
+    self._fake_context.get_job_config = Mock(return_value=mock_config)
+
+    err_msg = "Error."
+    self._mock_api.start_job_update.return_value = AuroraClientCommandTest.create_blank_response(
+        ResponseCode.INVALID_REQUEST,
+        err_msg)
+
+    with patch('apache.aurora.client.cli.update.DiffFormatter'):
+      with pytest.raises(Context.CommandError):
+        self._command.execute(self._fake_context)
+
+    assert self._mock_api.start_job_update.mock_calls == [
+        call(mock_config, None, self._mock_options.instance_spec.instance, ANY)
+    ]
+    assert self._fake_context.get_err() == [
+      StartUpdate.FAILED_TO_START_UPDATE_ERROR_MSG, "\t%s" % err_msg
+    ]
+
+  def test_start_update_already_inprogress(self):
+    mock_config = self.create_mock_config()
+    self._fake_context.get_job_config = Mock(return_value=mock_config)
+
+    update_id = 'some-mocked-uuid'
+
+    err_msg = "Active updates exist for this job."
+    return_value = AuroraClientCommandTest.create_start_job_update_result(
+      ResponseCode.INVALID_REQUEST, err_msg, UPDATE_KEY, {Metadata(CLIENT_UPDATE_ID, update_id)})
+    self._mock_api.start_job_update.return_value = return_value
+
+    with patch('apache.aurora.client.cli.update.DiffFormatter'):
+      with patch('apache.aurora.client.cli.update.uuid') as mock_uuid:
+        mock_uuid.uuid4.return_value = update_id
+        self._command.execute(self._fake_context)
+
+    assert self._mock_api.start_job_update.mock_calls == [
+        call(mock_config, None, self._mock_options.instance_spec.instance,
+             {CLIENT_UPDATE_ID: update_id})
+    ]
+    assert self._fake_context.get_out() == [
+      StartUpdate.UPDATE_MSG_TEMPLATE %
+      ('http://something_or_other/scheduler/bozo/test/hello/update/update_id'),
+    ]
+    assert self._fake_context.get_err() == []
+
+  def test_start_update_different_update_inprogress(self):
+    mock_config = self.create_mock_config()
+    self._fake_context.get_job_config = Mock(return_value=mock_config)
+
+    update_id = 'some-mocked-uuid'
+    update_id_2 = 'some-other-mocked-uuid'
+
+    err_msg = "Active updates exist for this job."
+    return_value = AuroraClientCommandTest.create_start_job_update_result(
+      ResponseCode.INVALID_REQUEST, err_msg, UPDATE_KEY, {Metadata(CLIENT_UPDATE_ID, update_id)})
+    self._mock_api.start_job_update.return_value = return_value
+
+    with patch('apache.aurora.client.cli.update.DiffFormatter'):
+      with pytest.raises(Context.CommandError):
+        with patch('apache.aurora.client.cli.update.uuid') as mock_uuid:
+          mock_uuid.uuid4.return_value = update_id_2
+          self._command.execute(self._fake_context)
+
+    assert self._mock_api.start_job_update.mock_calls == [
+        call(mock_config, None, self._mock_options.instance_spec.instance,
+             {CLIENT_UPDATE_ID: update_id_2})
+    ]
+    assert self._fake_context.get_out() == []
+    assert self._fake_context.get_err() == [
+      StartUpdate.FAILED_TO_START_UPDATE_ERROR_MSG, "\t%s" % err_msg
+    ]
 
   def test_update_cron_job_fails(self):
     mock_config = self.create_mock_config(is_cron=True)
@@ -148,7 +224,7 @@ class TestStartUpdate(AuroraClientCommandTest):
       call(self._mock_options.instance_spec.instance)
     ]
     assert self._mock_api.start_job_update.mock_calls == [
-        call(mock_config, None, self._mock_options.instance_spec.instance)
+        call(mock_config, None, self._mock_options.instance_spec.instance, ANY)
     ]
 
   def test_start_update_command_line_succeeds(self):
@@ -169,7 +245,7 @@ class TestStartUpdate(AuroraClientCommandTest):
       call(self._mock_options.instance_spec.instance)
     ]
     assert self._mock_api.start_job_update.mock_calls == [
-        call(ANY, 'hello', None)
+        call(ANY, 'hello', None, ANY)
     ]
     assert self._fake_context.get_out() == [
       StartUpdate.UPDATE_MSG_TEMPLATE %
@@ -197,7 +273,7 @@ class TestStartUpdate(AuroraClientCommandTest):
     assert self._formatter.show_job_update_diff.mock_calls == [
       call(self._mock_options.instance_spec.instance)
     ]
-    assert self._mock_api.start_job_update.mock_calls == [call(ANY, None, None)]
+    assert self._mock_api.start_job_update.mock_calls == [call(ANY, None, None, ANY)]
     assert self._mock_api.query_job_updates.mock_calls == [
       call(update_key=resp.result.startJobUpdateResult.key)
     ]
@@ -255,7 +331,7 @@ class TestStartUpdate(AuroraClientCommandTest):
     assert self._formatter.show_job_update_diff.mock_calls == [
       call(self._mock_options.instance_spec.instance)
     ]
-    assert self._mock_api.start_job_update.mock_calls == [call(ANY, None, None)]
+    assert self._mock_api.start_job_update.mock_calls == [call(ANY, None, None, ANY)]
     assert self._fake_context.get_out() == [
       "Noop update."
     ]
@@ -273,7 +349,7 @@ class TestStartUpdate(AuroraClientCommandTest):
         self._command.execute(self._fake_context)
 
     assert e.value == error
-    assert self._mock_api.start_job_update.mock_calls == [call(ANY, None, None)]
+    assert self._mock_api.start_job_update.mock_calls == [call(ANY, None, None, ANY)]
 
 
 class TestListUpdates(AuroraClientCommandTest):
@@ -552,7 +628,8 @@ class TestUpdateInfo(AuroraClientCommandTest):
                 instanceId=2,
                 timestampMs=9000,
                 action=JobUpdateAction.INSTANCE_UPDATED)])
-    query_response.result.getJobUpdateDetailsResult = GetJobUpdateDetailsResult(details=details)
+    query_response.result.getJobUpdateDetailsResult = GetJobUpdateDetailsResult(
+            detailsList=[details])
     return query_response
 
   def test_active_update_info(self):
@@ -705,3 +782,88 @@ class TestUpdateWait(AuroraClientCommandTest):
 
     assert self._fake_context.get_out() == []
     assert self._mock_api.query_job_updates.mock_calls == [self._fetch_call]
+
+
+class TestRollbackUpdate(AuroraClientCommandTest):
+  def setUp(self):
+    self._command = RollbackUpdate()
+    self._mock_options = mock_verb_options(self._command)
+    self._mock_options.jobspec = self.TEST_JOBKEY
+    self._mock_options.wait = False
+    self._fake_context = FakeAuroraCommandContext()
+    self._fake_context.set_options(self._mock_options)
+    self._mock_api = self._fake_context.get_api('UNUSED')
+
+  def test_rollback_update_command_line_succeeds(self):
+    self._mock_api.query_job_updates.return_value = get_status_query_response()
+    self._mock_api.rollback_job_update.return_value = self.create_simple_success_response()
+    self._mock_options.message = 'hello'
+    assert self._command.execute(self._fake_context) == EXIT_OK
+
+    assert self._mock_api.query_job_updates.mock_calls == [
+        call(update_statuses=ACTIVE_JOB_UPDATE_STATES, job_key=self.TEST_JOBKEY)]
+    assert self._mock_api.rollback_job_update.mock_calls == [call(UPDATE_KEY, 'hello')]
+    assert self._fake_context.get_out() == ["Update rollback has started."]
+    assert self._fake_context.get_err() == []
+
+  def test_rollback_update_command_line_error(self):
+    self._mock_api.query_job_updates.return_value = get_status_query_response()
+    self._mock_api.rollback_job_update.return_value = self.create_error_response()
+
+    with pytest.raises(Context.CommandError):
+      self._command.execute(self._fake_context)
+    assert self._mock_api.query_job_updates.mock_calls == [
+        call(update_statuses=ACTIVE_JOB_UPDATE_STATES, job_key=self.TEST_JOBKEY)]
+    assert self._mock_api.rollback_job_update.mock_calls == [call(UPDATE_KEY, None)]
+
+    assert self._fake_context.get_out() == []
+    assert self._fake_context.get_err() == ["Failed to rollback update due to error:", "\tWhoops"]
+
+  def test_rollback_invalid_api_response(self):
+    # Mimic the API returning two active updates for one job, which should be impossible.
+    self._mock_api.query_job_updates.return_value = get_status_query_response(count=2)
+    self._mock_api.rollback_job_update.return_value = self.create_error_response()
+    with pytest.raises(Context.CommandError) as error:
+      self._command.execute(self._fake_context)
+      assert error.message == (
+        'scheduler returned multiple active updates for this job.')
+
+    assert self._mock_api.query_job_updates.mock_calls == [
+        call(update_statuses=ACTIVE_JOB_UPDATE_STATES, job_key=self.TEST_JOBKEY)]
+    assert self._mock_api.rollback_job_update.mock_calls == []
+    assert self._fake_context.get_out() == []
+    assert self._fake_context.get_err() == []
+
+  def test_rollback_and_wait_success(self):
+    self._mock_options.wait = True
+
+    updating_response = get_status_query_response(status=JobUpdateStatus.ROLLING_FORWARD)
+    updated_response = get_status_query_response(status=JobUpdateStatus.ROLLED_BACK)
+
+    self._mock_api.query_job_updates.side_effect = [updating_response, updated_response]
+    self._mock_api.rollback_job_update.return_value = self.create_simple_success_response()
+
+    assert self._command.execute(self._fake_context) == EXIT_OK
+    assert self._mock_api.rollback_job_update.mock_calls == [call(UPDATE_KEY, None)]
+    assert self._fake_context.get_err() == []
+
+  def test_rollback_and_wait_rolled_forward(self):
+    self._mock_options.wait = True
+
+    updating_response = get_status_query_response(status=JobUpdateStatus.ROLLING_FORWARD)
+    updated_response = get_status_query_response(status=JobUpdateStatus.ROLLED_FORWARD)
+
+    self._mock_api.query_job_updates.side_effect = [updating_response, updated_response]
+
+    self._mock_api.rollback_job_update.return_value = self.create_simple_success_response()
+    assert self._command.execute(self._fake_context) == EXIT_COMMAND_FAILURE
+
+  def test_rollback_and_wait_error(self):
+    self._mock_options.wait = True
+    updating_response = get_status_query_response(status=JobUpdateStatus.ROLLING_FORWARD)
+    failed_response = get_status_query_response(status=JobUpdateStatus.ERROR)
+
+    self._mock_api.query_job_updates.side_effect = [updating_response, failed_response]
+
+    self._mock_api.rollback_job_update.return_value = self.create_simple_success_response()
+    assert self._command.execute(self._fake_context) == EXIT_UNKNOWN_ERROR

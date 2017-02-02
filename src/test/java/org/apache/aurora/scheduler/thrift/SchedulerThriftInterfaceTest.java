@@ -34,6 +34,7 @@ import org.apache.aurora.gen.ConfigRewrite;
 import org.apache.aurora.gen.Constraint;
 import org.apache.aurora.gen.Container;
 import org.apache.aurora.gen.ExecutorConfig;
+import org.apache.aurora.gen.ExplicitReconciliationSettings;
 import org.apache.aurora.gen.HostStatus;
 import org.apache.aurora.gen.Hosts;
 import org.apache.aurora.gen.Identity;
@@ -55,6 +56,7 @@ import org.apache.aurora.gen.ListBackupsResult;
 import org.apache.aurora.gen.LockKey;
 import org.apache.aurora.gen.MaintenanceMode;
 import org.apache.aurora.gen.MesosContainer;
+import org.apache.aurora.gen.Metadata;
 import org.apache.aurora.gen.PulseJobUpdateResult;
 import org.apache.aurora.gen.QueryRecoveryResult;
 import org.apache.aurora.gen.Range;
@@ -70,10 +72,12 @@ import org.apache.aurora.gen.StartJobUpdateResult;
 import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskConstraint;
 import org.apache.aurora.gen.ValueConstraint;
+import org.apache.aurora.gen.apiConstants;
 import org.apache.aurora.scheduler.TaskIdGenerator;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
+import org.apache.aurora.scheduler.configuration.ConfigurationManager;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager.TaskDescriptionException;
 import org.apache.aurora.scheduler.configuration.SanitizedConfiguration;
 import org.apache.aurora.scheduler.cron.CronException;
@@ -81,6 +85,7 @@ import org.apache.aurora.scheduler.cron.CronJobManager;
 import org.apache.aurora.scheduler.cron.SanitizedCronJob;
 import org.apache.aurora.scheduler.quota.QuotaCheckResult;
 import org.apache.aurora.scheduler.quota.QuotaManager;
+import org.apache.aurora.scheduler.reconciliation.TaskReconciler;
 import org.apache.aurora.scheduler.state.LockManager;
 import org.apache.aurora.scheduler.state.LockManager.LockException;
 import org.apache.aurora.scheduler.state.MaintenanceController;
@@ -96,13 +101,16 @@ import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdate;
 import org.apache.aurora.scheduler.storage.entities.ILockKey;
+import org.apache.aurora.scheduler.storage.entities.IMetadata;
 import org.apache.aurora.scheduler.storage.entities.IRange;
 import org.apache.aurora.scheduler.storage.entities.IResourceAggregate;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
+import org.apache.aurora.scheduler.testing.FakeStatsProvider;
 import org.apache.aurora.scheduler.updater.JobUpdateController;
 import org.apache.aurora.scheduler.updater.JobUpdateController.AuditData;
+import org.apache.aurora.scheduler.updater.UpdateInProgressException;
 import org.apache.aurora.scheduler.updater.UpdateStateException;
 import org.apache.thrift.TException;
 import org.easymock.EasyMock;
@@ -145,9 +153,20 @@ import static org.apache.aurora.scheduler.thrift.Fixtures.nonProductionTask;
 import static org.apache.aurora.scheduler.thrift.Fixtures.okResponse;
 import static org.apache.aurora.scheduler.thrift.Fixtures.productionTask;
 import static org.apache.aurora.scheduler.thrift.Fixtures.response;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.ADD_INSTANCES;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.CREATE_JOB;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.CREATE_OR_UPDATE_CRON;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.DRAIN_HOSTS;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.END_MAINTENANCE;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.KILL_TASKS;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.MAINTENANCE_STATUS;
 import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.MAX_TASK_ID_LENGTH;
 import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.NOOP_JOB_UPDATE_MESSAGE;
 import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.NO_CRON;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.RESTART_SHARDS;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.REWRITE_CONFIGS;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.START_JOB_UPDATE;
+import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.START_MAINTENANCE;
 import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.jobAlreadyExistsMessage;
 import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.noCronScheduleMessage;
 import static org.apache.aurora.scheduler.thrift.SchedulerThriftInterface.notScheduledCronMessage;
@@ -166,6 +185,9 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
   private static final String AUDIT_MESSAGE = "message";
   private static final AuditData AUDIT = new AuditData(USER, Optional.of(AUDIT_MESSAGE));
   private static final Thresholds THRESHOLDS = new Thresholds(1000, 2000);
+  private static final String EXECUTOR_NAME = apiConstants.AURORA_EXECUTOR_NAME;
+  private static final ImmutableSet<Metadata> METADATA =
+      ImmutableSet.of(new Metadata("k1", "v1"), new Metadata("k2", "v2"));
 
   private StorageTestUtil storageUtil;
   private LockManager lockManager;
@@ -181,6 +203,8 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
   private JobUpdateController jobUpdateController;
   private ReadOnlyScheduler.Iface readOnlyScheduler;
   private AuditMessages auditMessages;
+  private TaskReconciler taskReconciler;
+  private FakeStatsProvider statsProvider;
 
   @Before
   public void setUp() throws Exception {
@@ -198,6 +222,8 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     jobUpdateController = createMock(JobUpdateController.class);
     readOnlyScheduler = createMock(ReadOnlyScheduler.Iface.class);
     auditMessages = createMock(AuditMessages.class);
+    taskReconciler = createMock(TaskReconciler.class);
+    statsProvider = new FakeStatsProvider();
 
     thrift = getResponseProxy(
         new SchedulerThriftInterface(
@@ -215,7 +241,9 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
             uuidGenerator,
             jobUpdateController,
             readOnlyScheduler,
-            auditMessages));
+            auditMessages,
+            taskReconciler,
+            statsProvider));
   }
 
   private static AuroraAdmin.Iface getResponseProxy(AuroraAdmin.Iface realThrift) {
@@ -269,6 +297,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.createJob(makeProdJob()));
+    assertEquals(1L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -290,6 +319,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.createJob(job.newBuilder()));
+    assertEquals(1L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -299,6 +329,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertEquals(invalidResponse(NO_CRON), thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -307,6 +338,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -318,6 +350,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(LOCK_ERROR, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -329,6 +362,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -341,6 +375,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -359,6 +394,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -379,6 +415,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -395,6 +432,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job.newBuilder()));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   private void assertMessageMatches(Response response, String string) {
@@ -410,10 +448,11 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     JobConfiguration job =
         new JobConfiguration().setKey(JOB_KEY.newBuilder()).setOwner(IDENTITY);
     assertResponse(INVALID_REQUEST, thrift.createJob(job));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
-  public void testCreateJobFailsNoExecutorConfig() throws Exception {
+  public void testCreateJobFailsNoExecutorOrContainerConfig() throws Exception {
     JobConfiguration job = makeJob();
     job.getTaskConfig().unsetExecutorConfig();
 
@@ -421,8 +460,8 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
 
     Response response = thrift.createJob(job);
     assertResponse(INVALID_REQUEST, response);
-    // TODO(wfarner): Don't rely on a magic string here, reference a constant from the source.
-    assertMessageMatches(response, "Configuration may not be null");
+    assertMessageMatches(response, ConfigurationManager.NO_EXECUTOR_OR_CONTAINER);
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -433,6 +472,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -443,6 +483,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.createJob(job));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -453,7 +494,19 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     task.setNumCpus(0);
     task.setRamMb(0);
     task.setDiskMb(0);
+    task.unsetResources();
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCreateJobMissingResources() throws Exception {
+    control.replay();
+    TaskConfig task = productionTask();
+    task.unsetResources();
+    task.setResources(ImmutableSet.of(numCpus(1.0)));
+
+    thrift.createJob(makeJob(task));
   }
 
   @Test
@@ -461,7 +514,9 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     TaskConfig task = productionTask().setNumCpus(0.0);
+    task.unsetResources();
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -469,7 +524,9 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     TaskConfig task = productionTask().setRamMb(-123);
+    task.unsetResources();
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -477,19 +534,70 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     TaskConfig task = productionTask().setDiskMb(0);
+    task.unsetResources();
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+  }
+
+  @Test
+  public void testCreateJobBadResources() throws Exception {
+    control.replay();
+
+    TaskConfig task = productionTask()
+            .setResources(ImmutableSet.of(
+            numCpus(-1),
+            ramMb(1024),
+            diskMb(1024)))
+            .setNumCpus(0)
+            .setRamMb(0)
+            .setDiskMb(0);
+
+    assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
+  }
+
+  @Test
+  public void testCreateJobGoodResources() throws Exception {
+
+    TaskConfig task = productionTask()
+            .setResources(ImmutableSet.of(
+                    numCpus(1.0),
+                    ramMb(1024),
+                    diskMb(1024)))
+            .setNumCpus(0)
+            .setRamMb(0)
+            .setDiskMb(0);
+
+    IJobConfiguration job = IJobConfiguration.build(makeJob(task));
+    SanitizedConfiguration sanitized = fromUnsanitized(job);
+    lockManager.assertNotLocked(LOCK_KEY);
+    storageUtil.expectTaskFetch(Query.jobScoped(JOB_KEY).active());
+    expectNoCronJob();
+    expect(taskIdGenerator.generate(sanitized.getJobConfig().getTaskConfig(), 1))
+            .andReturn(TASK_ID);
+    expectInstanceQuotaCheck(sanitized, ENOUGH_QUOTA);
+
+    stateManager.insertPendingTasks(
+            storageUtil.mutableStoreProvider,
+            sanitized.getJobConfig().getTaskConfig(),
+            sanitized.getInstanceIds());
+
+    control.replay();
+
+    assertOkResponse(thrift.createJob(job.newBuilder()));
   }
 
   @Test
   public void testCreateJobPopulateDefaults() throws Exception {
     TaskConfig task = new TaskConfig()
         .setContactEmail("testing@twitter.com")
-        .setExecutorConfig(new ExecutorConfig("aurora", "config"))  // Arbitrary opaque data.
+        .setExecutorConfig(
+            new ExecutorConfig(EXECUTOR_NAME, "config")) // Arbitrary opaque data.
         .setNumCpus(1.0)
         .setRamMb(1024)
         .setDiskMb(1024)
         .setIsService(true)
         .setProduction(true)
+        .setTier(TaskTestUtil.PROD_TIER_NAME)
         .setOwner(IDENTITY)
         .setContainer(Container.mesos(new MesosContainer()))
         .setJob(JOB_KEY.newBuilder());
@@ -527,6 +635,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.createJob(job));
+    assertEquals(1L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -536,6 +645,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     TaskConfig task = nonProductionTask();
     task.setConstraints(ImmutableSet.of(dedicatedConstraint(ImmutableSet.of("mesos"))));
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -545,6 +655,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     TaskConfig task = nonProductionTask();
     task.setConstraints(ImmutableSet.of(dedicatedConstraint(1)));
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   @Test
@@ -554,6 +665,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     TaskConfig task = nonProductionTask();
     task.setConstraints(ImmutableSet.of(dedicatedConstraint(ImmutableSet.of("mesos", "test"))));
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   private IScheduledTask buildTaskForJobUpdate(int instanceId) {
@@ -566,7 +678,8 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
             .setInstanceId(instanceId)
             .setTask(populatedTask()
                 .setIsService(true)
-                .setExecutorConfig(new ExecutorConfig().setData(executorData)))));
+                .setExecutorConfig(new ExecutorConfig().setName(EXECUTOR_NAME)
+                    .setData(executorData)))));
   }
 
   private IScheduledTask buildScheduledTask() {
@@ -603,6 +716,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.killTasks(JOB_KEY.newBuilder(), null));
+    assertEquals(1L, statsProvider.getLongValue(KILL_TASKS));
   }
 
   @Test
@@ -615,6 +729,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.killTasks(JOB_KEY.newBuilder(), ImmutableSet.of(1)));
+    assertEquals(1L, statsProvider.getLongValue(KILL_TASKS));
   }
 
   @Test
@@ -633,6 +748,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertResponse(
         LOCK_ERROR,
         thrift.killTasks(JOB_KEY.newBuilder(), null));
+    assertEquals(0L, statsProvider.getLongValue(KILL_TASKS));
   }
 
   @Test
@@ -645,6 +761,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     Response response = thrift.killTasks(JOB_KEY.newBuilder(), null);
     assertOkResponse(response);
     assertMessageMatches(response, SchedulerThriftInterface.NO_TASKS_TO_KILL_MESSAGE);
+    assertEquals(0L, statsProvider.getLongValue(KILL_TASKS));
   }
 
   @Test
@@ -783,6 +900,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
 
     assertOkResponse(
         thrift.restartShards(JOB_KEY.newBuilder(), shards));
+    assertEquals(1L, statsProvider.getLongValue(RESTART_SHARDS));
   }
 
   @Test
@@ -797,6 +915,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertResponse(
         LOCK_ERROR,
         thrift.restartShards(JOB_KEY.newBuilder(), shards));
+    assertEquals(0L, statsProvider.getLongValue(KILL_TASKS));
   }
 
   @Test
@@ -811,6 +930,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertResponse(
         INVALID_REQUEST,
         thrift.restartShards(JOB_KEY.newBuilder(), shards));
+    assertEquals(0L, statsProvider.getLongValue(KILL_TASKS));
   }
 
   @Test
@@ -825,6 +945,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.replaceCronTemplate(CRON_JOB));
+    assertEquals(1L, statsProvider.getLongValue(CREATE_OR_UPDATE_CRON));
   }
 
   @Test
@@ -834,6 +955,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(LOCK_ERROR, thrift.replaceCronTemplate(CRON_JOB));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_OR_UPDATE_CRON));
   }
 
   @Test
@@ -850,6 +972,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.replaceCronTemplate(CRON_JOB));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_OR_UPDATE_CRON));
   }
 
   @Test
@@ -996,6 +1119,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.instanceRewrite(
             new InstanceConfigRewrite(instance, productionTask(), productionTask()))));
     assertResponse(WARNING, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
@@ -1004,6 +1128,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
 
     RewriteConfigsRequest request = new RewriteConfigsRequest(ImmutableList.of());
     assertResponse(INVALID_REQUEST, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test(expected = RuntimeException.class)
@@ -1033,13 +1158,14 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
                 .setOwner(rewrittenIdentity)
                 .setKey(rewrittenJobKey)))));
     assertResponse(WARNING, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
   public void testRewriteShardCasMismatch() throws Exception {
     TaskConfig storedConfig = productionTask();
     TaskConfig modifiedConfig =
-        storedConfig.deepCopy().setExecutorConfig(new ExecutorConfig("aurora", "rewritten"));
+        storedConfig.deepCopy().setExecutorConfig(new ExecutorConfig(EXECUTOR_NAME, "rewritten"));
     IScheduledTask storedTask = IScheduledTask.build(
         new ScheduledTask().setAssignedTask(new AssignedTask().setTask(storedConfig)));
     InstanceKey instance = new InstanceKey(storedConfig.getJob(), 0);
@@ -1053,13 +1179,14 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.instanceRewrite(
             new InstanceConfigRewrite(instance, modifiedConfig, modifiedConfig))));
     assertResponse(WARNING, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
   public void testRewriteInstance() throws Exception {
     TaskConfig storedConfig = productionTask();
     ITaskConfig modifiedConfig = ITaskConfig.build(
-        storedConfig.deepCopy().setExecutorConfig(new ExecutorConfig("aurora", "rewritten")));
+        storedConfig.deepCopy().setExecutorConfig(new ExecutorConfig(EXECUTOR_NAME, "rewritten")));
     String taskId = "task_id";
     IScheduledTask storedTask = IScheduledTask.build(new ScheduledTask().setAssignedTask(
         new AssignedTask()
@@ -1077,6 +1204,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.instanceRewrite(
             new InstanceConfigRewrite(instanceKey, storedConfig, modifiedConfig.newBuilder()))));
     assertOkResponse(thrift.rewriteConfigs(request));
+    assertEquals(1L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
@@ -1102,13 +1230,14 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.instanceRewrite(
             new InstanceConfigRewrite(instanceKey, config, config))));
     assertResponse(WARNING, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
   public void testRewriteJobCasMismatch() throws Exception {
     JobConfiguration oldJob = makeJob(productionTask());
     JobConfiguration newJob = oldJob.deepCopy();
-    newJob.getTaskConfig().setExecutorConfig(new ExecutorConfig("aurora", "rewritten"));
+    newJob.getTaskConfig().setExecutorConfig(new ExecutorConfig(EXECUTOR_NAME, "rewritten"));
     expect(storageUtil.jobStore.fetchJob(IJobKey.build(oldJob.getKey())))
         .andReturn(Optional.of(IJobConfiguration.build(oldJob)));
 
@@ -1118,13 +1247,14 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.jobRewrite(
             new JobConfigRewrite(newJob, newJob))));
     assertResponse(WARNING, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
   public void testRewriteJobNotFound() throws Exception {
     JobConfiguration oldJob = makeJob(productionTask());
     JobConfiguration newJob = oldJob.deepCopy();
-    newJob.getTaskConfig().setExecutorConfig(new ExecutorConfig("aurora", "rewritten"));
+    newJob.getTaskConfig().setExecutorConfig(new ExecutorConfig(EXECUTOR_NAME, "rewritten"));
     expect(storageUtil.jobStore.fetchJob(IJobKey.build(oldJob.getKey())))
         .andReturn(Optional.absent());
 
@@ -1134,13 +1264,14 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.jobRewrite(
             new JobConfigRewrite(oldJob, newJob))));
     assertResponse(WARNING, thrift.rewriteConfigs(request));
+    assertEquals(0L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
   public void testRewriteJob() throws Exception {
     JobConfiguration oldJob = makeJob(productionTask());
     JobConfiguration newJob = oldJob.deepCopy();
-    newJob.getTaskConfig().setExecutorConfig(new ExecutorConfig("aurora", "rewritten"));
+    newJob.getTaskConfig().setExecutorConfig(new ExecutorConfig(EXECUTOR_NAME, "rewritten"));
     expect(storageUtil.jobStore.fetchJob(IJobKey.build(oldJob.getKey())))
         .andReturn(Optional.of(IJobConfiguration.build(oldJob)));
     storageUtil.jobStore.saveAcceptedJob(validateAndPopulate(IJobConfiguration.build(newJob)));
@@ -1151,6 +1282,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         ImmutableList.of(ConfigRewrite.jobRewrite(
             new JobConfigRewrite(oldJob, newJob))));
     assertOkResponse(thrift.rewriteConfigs(request));
+    assertEquals(1L, statsProvider.getLongValue(REWRITE_CONFIGS));
   }
 
   @Test
@@ -1160,6 +1292,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     TaskConfig task = nonProductionTask();
     task.setConstraints(ImmutableSet.of(dedicatedConstraint(ImmutableSet.of("mesos"))));
     assertResponse(INVALID_REQUEST, thrift.createJob(makeJob(task)));
+    assertEquals(0L, statsProvider.getLongValue(CREATE_JOB));
   }
 
   private static Set<IHostStatus> status(String host, MaintenanceMode mode) {
@@ -1188,24 +1321,30 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         IHostStatus.toBuildersSet(none),
         thrift.maintenanceStatus(hosts).getResult().getMaintenanceStatusResult()
             .getStatuses());
+    assertEquals(1L, statsProvider.getLongValue(MAINTENANCE_STATUS));
     assertEquals(
         IHostStatus.toBuildersSet(scheduled),
         thrift.startMaintenance(hosts).getResult().getStartMaintenanceResult()
             .getStatuses());
+    assertEquals(1L, statsProvider.getLongValue(START_MAINTENANCE));
     assertEquals(
         IHostStatus.toBuildersSet(draining),
         thrift.drainHosts(hosts).getResult().getDrainHostsResult().getStatuses());
+    assertEquals(1L, statsProvider.getLongValue(DRAIN_HOSTS));
     assertEquals(
         IHostStatus.toBuildersSet(draining),
         thrift.maintenanceStatus(hosts).getResult().getMaintenanceStatusResult()
             .getStatuses());
+    assertEquals(2L, statsProvider.getLongValue(MAINTENANCE_STATUS));
     assertEquals(
         IHostStatus.toBuildersSet(drained),
         thrift.maintenanceStatus(hosts).getResult().getMaintenanceStatusResult()
             .getStatuses());
+    assertEquals(3L, statsProvider.getLongValue(MAINTENANCE_STATUS));
     assertEquals(
         IHostStatus.toBuildersSet(none),
         thrift.endMaintenance(hosts).getResult().getEndMaintenanceResult().getStatuses());
+    assertEquals(1L, statsProvider.getLongValue(END_MAINTENANCE));
   }
 
   private static Response okEmptyResponse() {
@@ -1245,6 +1384,58 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
   }
 
   @Test
+  public void testExplicitTaskReconciliationWithNoBatchSize() throws Exception {
+    ExplicitReconciliationSettings settings = new ExplicitReconciliationSettings();
+
+    taskReconciler.triggerExplicitReconciliation(Optional.absent());
+    expectLastCall();
+
+    control.replay();
+
+    assertOkResponse(thrift.triggerExplicitTaskReconciliation(settings));
+  }
+
+  @Test
+  public void testExplicitTaskReconciliationWithValidBatchSize() throws Exception {
+    ExplicitReconciliationSettings settings = new ExplicitReconciliationSettings();
+    settings.setBatchSize(10);
+
+    taskReconciler.triggerExplicitReconciliation(Optional.of(settings.getBatchSize()));
+    expectLastCall();
+
+    control.replay();
+    assertOkResponse(thrift.triggerExplicitTaskReconciliation(settings));
+  }
+
+  @Test
+  public void testExplicitTaskReconciliationWithNegativeBatchSize() throws Exception {
+    ExplicitReconciliationSettings settings = new ExplicitReconciliationSettings();
+    settings.setBatchSize(-1000);
+
+    control.replay();
+    assertResponse(INVALID_REQUEST, thrift.triggerExplicitTaskReconciliation(settings));
+  }
+
+  @Test
+  public void testExplicitTaskReconciliationWithZeroBatchSize() throws Exception {
+    ExplicitReconciliationSettings settings = new ExplicitReconciliationSettings();
+    settings.setBatchSize(0);
+
+    control.replay();
+    assertResponse(INVALID_REQUEST, thrift.triggerExplicitTaskReconciliation(settings));
+  }
+
+  @Test
+  public void testImplicitTaskReconciliation() throws Exception {
+    taskReconciler.triggerImplicitReconciliation();
+    expectLastCall();
+
+    control.replay();
+
+    assertOkResponse(thrift.triggerImplicitTaskReconciliation());
+  }
+
+  @Test
   public void testAddInstancesWithInstanceKey() throws Exception {
     expectNoCronJob();
     lockManager.assertNotLocked(LOCK_KEY);
@@ -1264,6 +1455,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertOkResponse(thrift.addInstances(INSTANCE_KEY, 2));
+    assertEquals(2L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1277,6 +1469,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_INSTANCE_ID),
         thrift.addInstances(INSTANCE_KEY, 2));
+    assertEquals(0L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1290,6 +1483,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_INSTANCE_COUNT),
         thrift.addInstances(INSTANCE_KEY, 0));
+    assertEquals(0L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1319,6 +1513,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(LOCK_ERROR, thrift.addInstances(INSTANCE_KEY, 1));
+    assertEquals(0L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1338,6 +1533,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.addInstances(INSTANCE_KEY, 1));
+    assertEquals(0L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1354,6 +1550,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.addInstances(INSTANCE_KEY, 1));
+    assertEquals(0L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1375,6 +1572,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.addInstances(INSTANCE_KEY, 1));
+    assertEquals(0L, statsProvider.getLongValue(ADD_INSTANCES));
   }
 
   @Test
@@ -1420,8 +1618,9 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     Response response =
         assertOkResponse(thrift.startJobUpdate(buildJobUpdateRequest(update), AUDIT_MESSAGE));
     assertEquals(
-        new StartJobUpdateResult(UPDATE_KEY.newBuilder()),
-        response.getResult().getStartJobUpdateResult());
+        new StartJobUpdateResult(UPDATE_KEY.newBuilder()).setUpdateSummary(
+        update.getSummary().newBuilder()), response.getResult().getStartJobUpdateResult());
+    assertEquals(6L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   private void expectJobUpdateQuotaCheck(QuotaCheckResult result) {
@@ -1468,8 +1667,9 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     Response response = assertOkResponse(
         thrift.startJobUpdate(buildJobUpdateRequest(update), AUDIT_MESSAGE));
     assertEquals(
-        new StartJobUpdateResult(UPDATE_KEY.newBuilder()),
+        new StartJobUpdateResult(UPDATE_KEY.newBuilder()).setUpdateSummary(expected.getSummary()),
         response.getResult().getStartJobUpdateResult());
+    assertEquals(1L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test(expected = NullPointerException.class)
@@ -1496,6 +1696,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_GROUP_SIZE),
         thrift.startJobUpdate(updateRequest, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1508,6 +1709,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_MAX_INSTANCE_FAILURES),
         thrift.startJobUpdate(updateRequest, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1521,6 +1723,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.TOO_MANY_POTENTIAL_FAILED_INSTANCES),
         thrift.startJobUpdate(updateRequest, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1533,6 +1736,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_MAX_FAILED_INSTANCES),
         thrift.startJobUpdate(updateRequest, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1545,6 +1749,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_MIN_WAIT_TO_RUNNING),
         thrift.startJobUpdate(updateRequest, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1552,6 +1757,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
     JobUpdateRequest request = buildJobUpdateRequest(populatedTask().setIsService(false));
     assertResponse(INVALID_REQUEST, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1564,6 +1770,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         invalidResponse(SchedulerThriftInterface.INVALID_PULSE_TIMEOUT),
         thrift.startJobUpdate(updateRequest, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1573,6 +1780,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
 
     control.replay();
     assertEquals(invalidResponse(NO_CRON), thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1581,6 +1789,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
 
     control.replay();
     assertResponse(INVALID_REQUEST, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1604,6 +1813,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertEquals(
         NOOP_JOB_UPDATE_MESSAGE,
         Iterables.getOnlyElement(response.getDetails()).getMessage());
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1626,6 +1836,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
     JobUpdateRequest request = buildJobUpdateRequest(IJobUpdate.build(builder));
     assertResponse(INVALID_REQUEST, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1665,6 +1876,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
     JobUpdateRequest request = buildJobUpdateRequest(IJobUpdate.build(builder));
     assertResponse(OK, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(3L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1680,6 +1892,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1697,6 +1910,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1716,6 +1930,7 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     control.replay();
 
     assertResponse(INVALID_REQUEST, thrift.startJobUpdate(request, AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1744,6 +1959,39 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     assertResponse(
         INVALID_REQUEST,
         thrift.startJobUpdate(buildJobUpdateRequest(update), AUDIT_MESSAGE));
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
+  }
+
+  @Test
+  public void testStartUpdateFailsInControllerWhenUpdateInProgress() throws Exception {
+    expectGetRemoteUser();
+    expectNoCronJob();
+
+    IScheduledTask oldTask = buildTaskForJobUpdate(0, "old");
+    ITaskConfig newTask = buildTaskForJobUpdate(0, "new").getAssignedTask().getTask();
+
+    IJobUpdate update = buildJobUpdate(
+        1,
+        newTask,
+        ImmutableMap.of(oldTask.getAssignedTask().getTask(), ImmutableSet.of(new Range(0, 0))));
+
+    expect(uuidGenerator.createNew()).andReturn(UU_ID);
+    expect(taskIdGenerator.generate(newTask, 1)).andReturn(TASK_ID);
+    expectJobUpdateQuotaCheck(ENOUGH_QUOTA);
+
+    storageUtil.expectTaskFetch(Query.unscoped().byJob(JOB_KEY).active(), oldTask);
+    jobUpdateController.start(update, AUDIT);
+    expectLastCall().andThrow(new UpdateInProgressException("failed", update.getSummary()));
+
+    control.replay();
+
+    Response response = thrift.startJobUpdate(buildJobUpdateRequest(update), AUDIT_MESSAGE);
+
+    assertResponse(INVALID_REQUEST, response);
+    assertEquals(
+        new StartJobUpdateResult(UPDATE_KEY.newBuilder()).setUpdateSummary(
+            update.getSummary().newBuilder()), response.getResult().getStartJobUpdateResult());
+    assertEquals(0L, statsProvider.getLongValue(START_JOB_UPDATE));
   }
 
   @Test
@@ -1949,7 +2197,8 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
         .setInstanceCount(rangesToInstanceCount(
             update.getInstructions().getDesiredState().getInstances()))
         .setSettings(update.getInstructions().getSettings().newBuilder())
-        .setTaskConfig(update.getInstructions().getDesiredState().getTask().newBuilder());
+        .setTaskConfig(update.getInstructions().getDesiredState().getTask().newBuilder())
+        .setMetadata(IMetadata.toBuildersSet(update.getSummary().getMetadata()));
   }
 
   private static IJobUpdate buildJobUpdate(
@@ -1965,7 +2214,8 @@ public class SchedulerThriftInterfaceTest extends EasyMockTest {
     return IJobUpdate.build(new JobUpdate()
         .setSummary(new JobUpdateSummary()
             .setKey(UPDATE_KEY.newBuilder())
-            .setUser(IDENTITY.getUser()))
+            .setUser(IDENTITY.getUser())
+            .setMetadata(METADATA))
         .setInstructions(new JobUpdateInstructions()
             .setSettings(buildJobUpdateSettings())
             .setDesiredState(new InstanceTaskConfig()

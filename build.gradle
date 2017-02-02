@@ -80,15 +80,18 @@ For more details, please see https://issues.apache.org/jira/browse/AURORA-1169
   }
 
   ext.commonsLangRev = '2.6'
-  ext.curatorRev = '2.10.0'
+  ext.curatorRev = '2.11.1'
   ext.gsonRev = '2.3.1'
-  ext.guavaRev = '19.0'
+  ext.guavaRev = '20.0'
   ext.guiceRev = '3.0'
+  ext.httpclientRev = '4.5.2'
+  ext.httpcoreRev = '4.4.4'
   ext.jacksonRev = '2.5.1'
   ext.jerseyRev = '1.19'
   ext.jsrRev = '3.0.1'
   ext.junitRev = '4.12'
-  ext.mybatisRev = '3.3.1'
+  ext.logbackRev = '1.1.3'
+  ext.mybatisRev = '3.4.1'
   ext.protobufRev = '2.6.1'
   ext.servletRev = '3.1.0'
   ext.slf4jRev = '1.7.12'
@@ -109,6 +112,8 @@ For more details, please see https://issues.apache.org/jira/browse/AURORA-1169
       // See http://forums.gradle.org/gradle/topics/shouldnt-resolutionstrategy-affect-depending-projects-transitive-dependencies
       resolutionStrategy {
         failOnVersionConflict()
+        force "org.apache.httpcomponents:httpclient:${httpclientRev}"
+        force "org.apache.httpcomponents:httpcore:${httpcoreRev}"
         force "com.fasterxml.jackson.core:jackson-annotations:${jacksonRev}"
         force "com.fasterxml.jackson.core:jackson-core:${jacksonRev}"
         force "com.google.code.gson:gson:${gsonRev}"
@@ -339,7 +344,7 @@ sourceSets {
 
 dependencies {
   def shiroRev = '1.2.4'
-  def jettyDep = '9.3.6.v20151106'
+  def jettyDep = '9.3.11.v20160721'
 
   compile project(':api')
   compile project(':commons')
@@ -351,7 +356,7 @@ dependencies {
   compile "com.google.inject:guice:${guiceRev}"
   compile "com.google.inject.extensions:guice-assistedinject:${guiceRev}"
   compile "com.google.protobuf:protobuf-java:${protobufRev}"
-  compile 'com.h2database:h2:1.4.190'
+  compile 'com.h2database:h2:1.4.193'
   compile 'com.hubspot.jackson:jackson-datatype-protobuf:0.9.3'
   compile "com.fasterxml.jackson.core:jackson-core:${jacksonRev}"
   compile "com.sun.jersey:jersey-core:${jerseyRev}"
@@ -365,7 +370,9 @@ dependencies {
   compile "org.apache.curator:curator-client:${curatorRev}"
   compile "org.apache.curator:curator-framework:${curatorRev}"
   compile "org.apache.curator:curator-recipes:${curatorRev}"
-  compile 'org.apache.mesos:mesos:0.27.2'
+  compile 'org.apache.mesos:mesos:1.1.0'
+  compile "org.apache.httpcomponents:httpclient:${httpclientRev}"
+  compile "org.apache.httpcomponents:httpcore:${httpcoreRev}"
   compile "org.apache.shiro:shiro-guice:${shiroRev}"
   compile "org.apache.shiro:shiro-web:${shiroRev}"
   compile "org.apache.zookeeper:zookeeper:${zookeeperRev}"
@@ -381,6 +388,8 @@ dependencies {
 
   testCompile "com.sun.jersey:jersey-client:${jerseyRev}"
   testCompile "junit:junit:${junitRev}"
+  testCompile "org.powermock:powermock-module-junit4:1.6.4"
+  testCompile "org.powermock:powermock-api-easymock:1.6.4"
 }
 
 // For normal developer builds, avoid running the often-time-consuming code quality checks.
@@ -401,7 +410,7 @@ codeQualityTasks.each {
 
 checkstyle {
   sourceSets = [sourceSets.main , sourceSets.test, sourceSets.jmh]
-  toolVersion = '6.13'
+  toolVersion = '7.3'
 }
 
 findbugs {
@@ -419,7 +428,7 @@ tasks.withType(FindBugs) {
 }
 
 pmd {
-  toolVersion = '5.4.1'
+  toolVersion = '5.5.2'
   consoleOutput = true
 }
 
@@ -616,7 +625,7 @@ jmh {
   if (project.hasProperty('benchmarks')) {
     include = project.getProperty('benchmarks')
   }
-  jmhVersion = '1.11.3'
+  jmhVersion = '1.15'
   jvmArgsPrepend = '-Xmx3g'
   humanOutputFile = project.file("$jmhHumanOutputPath")
   resultsFile = project.file("$buildDir/reports/jmh/results.txt")

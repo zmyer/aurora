@@ -17,7 +17,7 @@ set -o errexit
 set -o nounset
 set -o verbose
 
-readonly MESOS_VERSION=0.27.2
+readonly MESOS_VERSION=1.1.0
 
 function remove_unused {
   # The default ubuntu/trusty64 image includes juju-core, which adds ~300 MB to our image.
@@ -36,6 +36,7 @@ function install_base_packages {
       jq \
       libapr1-dev \
       libcurl4-nss-dev \
+      libffi-dev \
       libsasl2-dev \
       libsvn-dev \
       openjdk-8-jdk-headless \
@@ -57,6 +58,7 @@ function install_docker {
     linux-image-extra-$(uname -r) \
     apparmor \
     docker-engine
+  docker run -d -p 5000:5000 --restart=always --name registry registry:2
 }
 
 function install_docker2aci {
@@ -133,10 +135,12 @@ function warm_artifact_cache {
   mkdir -p "$THIRD_PARTY_DIR"
 
   # Fetch the mesos egg, needed to build python components.
-  # The mesos.native target in 3rdparty/python/BUILD expects to find the native egg in third_party.
+  # The mesos.executor target in 3rdparty/python/BUILD expects to find the native egg in
+  # third_party.
   SVN_ROOT='https://svn.apache.org/repos/asf/aurora/3rdparty'
   pushd "$THIRD_PARTY_DIR"
-    wget -c ${SVN_ROOT}/ubuntu/trusty64/python/mesos.native-${MESOS_VERSION}-py2.7-linux-x86_64.egg
+    wget -c \
+      ${SVN_ROOT}/ubuntu/trusty64/python/mesos.executor-${MESOS_VERSION}-py2.7-linux-x86_64.egg
   popd
 
   chown -R vagrant:vagrant aurora

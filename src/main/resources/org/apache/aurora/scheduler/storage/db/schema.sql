@@ -181,6 +181,14 @@ CREATE TABLE task_config_metadata(
   value VARCHAR NOT NULL
 );
 
+CREATE TABLE task_config_mesos_fetcher_uris(
+  id IDENTITY,
+  task_config_id BIGINT NOT NULL REFERENCES task_configs(id) ON DELETE CASCADE,
+  value VARCHAR NOT NULL,
+  extract BOOLEAN NOT NULL,
+  cache BOOLEAN NOT NULL
+);
+
 CREATE TABLE task_config_docker_containers(
   id IDENTITY,
   task_config_id BIGINT NOT NULL REFERENCES task_configs(id) ON DELETE CASCADE,
@@ -210,6 +218,23 @@ CREATE TABLE task_config_appc_images(
   task_config_id BIGINT NOT NULL REFERENCES task_configs(id) ON DELETE CASCADE,
   name VARCHAR NOT NULL,
   image_id VARCHAR NOT NULL,
+
+  UNIQUE(task_config_id)
+);
+
+CREATE TABLE volume_modes(
+  id INT PRIMARY KEY,
+  name VARCHAR NOT NULL,
+
+  UNIQUE(name)
+);
+
+CREATE TABLE task_config_volumes(
+  id IDENTITY,
+  task_config_id BIGINT NOT NULL REFERENCES task_configs(id) ON DELETE CASCADE,
+  host_path VARCHAR NOT NULL,
+  container_path VARCHAR NOT NULL,
+  mode INT NOT NULL REFERENCES volume_modes(id),
 
   UNIQUE(task_config_id)
 );
@@ -299,6 +324,13 @@ CREATE TABLE job_updates(
   block_if_no_pulses_after_ms INT NULL,
 
   UNIQUE(update_id, job_key_id)
+);
+
+CREATE TABLE job_update_metadata(
+  id IDENTITY,
+  update_row_id BIGINT NOT NULL REFERENCES job_updates(id) ON DELETE CASCADE,
+  key VARCHAR NOT NULL,
+  value VARCHAR NOT NULL
 );
 
 CREATE TABLE job_update_locks(

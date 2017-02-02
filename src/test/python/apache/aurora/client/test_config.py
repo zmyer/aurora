@@ -15,11 +15,13 @@
 import os
 from io import BytesIO
 
+import mock
 import pytest
 from twitter.common.contextutil import temporary_dir
 
 from apache.aurora.client import config
 from apache.aurora.client.config import get_config as get_aurora_config
+from apache.aurora.client.config import PRODUCTION_DEPRECATED_WARNING
 from apache.aurora.config import AuroraConfig
 from apache.aurora.config.loader import AuroraConfigLoader
 from apache.aurora.config.schema.base import (
@@ -31,6 +33,7 @@ from apache.aurora.config.schema.base import (
     Task,
     UpdateConfig
 )
+from apache.thermos.config.schema_base import Process
 
 MESOS_CONFIG_BASE = """
 HELLO_WORLD = Job(
@@ -189,21 +192,21 @@ def test_update_config_passes_with_default_values():
   config._validate_update_config(AuroraConfig(base_job))
 
 
-def test_update_config_passes_with_min_requirement_values():
+def test_update_config_passes_with_max_consecutive_failures_zero():
   base_job = Job(
     name='hello_world', role='john_doe', cluster='test-cluster',
-    update_config=UpdateConfig(watch_secs=26),
-    health_check_config=HealthCheckConfig(max_consecutive_failures=1),
+    health_check_config=HealthCheckConfig(max_consecutive_failures=0),
     task=Task(name='main', processes=[],
               resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
 
   config._validate_update_config(AuroraConfig(base_job))
 
 
-def test_update_config_fails_insufficient_watch_secs_less_than_target():
+def test_update_config_fails_with_max_consecutive_failures_negative():
   base_job = Job(
     name='hello_world', role='john_doe', cluster='test-cluster',
-    update_config=UpdateConfig(watch_secs=10),
+    update_config=UpdateConfig(watch_secs=26),
+    health_check_config=HealthCheckConfig(max_consecutive_failures=-1),
     task=Task(name='main', processes=[],
               resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
 
@@ -211,13 +214,62 @@ def test_update_config_fails_insufficient_watch_secs_less_than_target():
     config._validate_update_config(AuroraConfig(base_job))
 
 
-def test_update_config_fails_insufficient_watch_secs_equal_to_target():
+def test_update_config_passes_with_min_consecutive_successes_zero():
   base_job = Job(
     name='hello_world', role='john_doe', cluster='test-cluster',
-    update_config=UpdateConfig(watch_secs=25),
-    health_check_config=HealthCheckConfig(max_consecutive_failures=1),
+    health_check_config=HealthCheckConfig(min_consecutive_successes=0),
+    task=Task(name='main', processes=[],
+              resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
+
+  config._validate_update_config(AuroraConfig(base_job))
+
+
+def test_update_config_fails_with_min_consecutive_successes_negative():
+  base_job = Job(
+    name='hello_world', role='john_doe', cluster='test-cluster',
+    health_check_config=HealthCheckConfig(min_consecutive_successes=-1),
     task=Task(name='main', processes=[],
               resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
 
   with pytest.raises(SystemExit):
     config._validate_update_config(AuroraConfig(base_job))
+
+
+def test_update_config_passes_with_watch_secs_zero():
+  base_job = Job(
+    name='hello_world', role='john_doe', cluster='test-cluster',
+    update_config=UpdateConfig(watch_secs=0),
+    task=Task(name='main', processes=[],
+              resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
+
+  config._validate_update_config(AuroraConfig(base_job))
+
+
+def test_update_config_fails_watch_secs_negative():
+  base_job = Job(
+    name='hello_world', role='john_doe', cluster='test-cluster',
+    update_config=UpdateConfig(watch_secs=-1),
+    task=Task(name='main', processes=[],
+              resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
+
+  with pytest.raises(SystemExit):
+    config._validate_update_config(AuroraConfig(base_job))
+
+
+def test_validate_deprecated_config_adds_warning_for_production():
+  job = Job(name='hello_world', role='john_doe', cluster='test-cluster', environment='test',
+    task=Task(name='main', processes=[Process(cmdline='echo {{_unbound_}}', name='eco')],
+    resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)), production='true')
+  with mock.patch('apache.aurora.client.config.deprecation_warning') as mock_warning:
+    config._validate_deprecated_config(AuroraConfig(job))
+    mock_warning.assert_called_once_with(PRODUCTION_DEPRECATED_WARNING)
+
+
+def test_validate_deprecated_config_adds_no_warning_when_tier_is_set():
+  job = Job(name='hello_world', role='john_doe', cluster='test-cluster', environment='test',
+    task=Task(name='main', processes=[Process(cmdline='echo {{_unbound_}}', name='eco')],
+    resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)),
+  production='true', tier='preferred')
+  with mock.patch('apache.aurora.client.config.deprecation_warning') as mock_warning:
+    config._validate_deprecated_config(AuroraConfig(job))
+    assert mock_warning.call_count == 0

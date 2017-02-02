@@ -52,6 +52,7 @@ import org.apache.aurora.scheduler.configuration.executor.ExecutorModule;
 import org.apache.aurora.scheduler.cron.quartz.CronModule;
 import org.apache.aurora.scheduler.discovery.FlaggedZooKeeperConfig;
 import org.apache.aurora.scheduler.discovery.ServiceDiscoveryModule;
+import org.apache.aurora.scheduler.events.WebhookModule;
 import org.apache.aurora.scheduler.http.HttpService;
 import org.apache.aurora.scheduler.log.mesos.MesosLogStreamModule;
 import org.apache.aurora.scheduler.mesos.CommandLineDriverSettingsModule;
@@ -81,9 +82,16 @@ public class SchedulerMain {
   @CmdLine(name = "serverset_path", help = "ZooKeeper ServerSet path to register at.")
   private static final Arg<String> SERVERSET_PATH = Arg.create();
 
+  @CmdLine(name = "serverset_endpoint_name",
+      help = "Name of the scheduler endpoint published in ZooKeeper.")
+  private static final Arg<String> SERVERSET_ENDPOINT_NAME = Arg.create("http");
+
   // TODO(Suman Karumuri): Rename viz_job_url_prefix to stats_job_url_prefix for consistency.
   @CmdLine(name = "viz_job_url_prefix", help = "URL prefix for job container stats.")
   private static final Arg<String> STATS_URL_PREFIX = Arg.create("");
+
+  @CmdLine(name = "allow_gpu_resource", help = "Allow jobs to request Mesos GPU resource.")
+  private static final Arg<Boolean> ALLOW_GPU_RESOURCE = Arg.create(false);
 
   @Inject private SingletonService schedulerService;
   @Inject private HttpService httpService;
@@ -112,11 +120,11 @@ public class SchedulerMain {
 
     HostAndPort httpAddress = httpService.getAddress();
     InetSocketAddress httpSocketAddress =
-        InetSocketAddress.createUnresolved(httpAddress.getHostText(), httpAddress.getPort());
+        InetSocketAddress.createUnresolved(httpAddress.getHost(), httpAddress.getPort());
     try {
       schedulerService.lead(
           httpSocketAddress,
-          ImmutableMap.of("http", httpSocketAddress),
+          ImmutableMap.of(SERVERSET_ENDPOINT_NAME.get(), httpSocketAddress),
           leaderListener);
     } catch (SingletonService.LeadException e) {
       throw new IllegalStateException("Failed to lead service.", e);
@@ -133,7 +141,7 @@ public class SchedulerMain {
     return Modules.combine(
         new LifecycleModule(),
         new StatsModule(),
-        new AppModule(),
+        new AppModule(ALLOW_GPU_RESOURCE.get()),
         new CronModule(),
         new DbModule.MigrationManagerModule(),
         DbModule.productionModule(Bindings.annotatedKeyFactory(Storage.Volatile.class)),
@@ -194,11 +202,13 @@ public class SchedulerMain {
 
     List<Module> modules = ImmutableList.<Module>builder()
         .add(
-            new CommandLineDriverSettingsModule(),
+            new CommandLineDriverSettingsModule(ALLOW_GPU_RESOURCE.get()),
             new LibMesosLoadingModule(),
             new MesosLogStreamModule(FlaggedZooKeeperConfig.create()),
             new LogStorageModule(),
-            new TierModule())
+            new TierModule(),
+            new WebhookModule()
+        )
         .build();
     flagConfiguredMain(Modules.combine(modules));
   }

@@ -24,9 +24,11 @@ import org.apache.aurora.scheduler.storage.entities.IDockerContainer;
 import org.apache.aurora.scheduler.storage.entities.IDockerParameter;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.ILimitConstraint;
+import org.apache.aurora.scheduler.storage.entities.IMesosFetcherURI;
 import org.apache.aurora.scheduler.storage.entities.IMetadata;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.apache.aurora.scheduler.storage.entities.IValueConstraint;
+import org.apache.aurora.scheduler.storage.entities.IVolume;
 import org.apache.ibatis.annotations.Param;
 
 /**
@@ -126,7 +128,7 @@ interface TaskConfigMapper extends GarbageCollectedTableMapper {
       @Param("result") InsertResult result);
 
   /**
-   * Inserts docker parameters in associationw ith an {@link IDockerContainer}.
+   * Inserts docker parameters in association with an {@link IDockerContainer}.
    *
    * @param containerId Docker container row ID.
    * @param parameters Parameters to insert.
@@ -144,6 +146,16 @@ interface TaskConfigMapper extends GarbageCollectedTableMapper {
   void insertMetadata(
       @Param("configId") long configId,
       @Param("metadata") Set<IMetadata> metadata);
+
+  /**
+   * Inserts the Mesos Fetcher URIs in association with an {@link ITaskConfig}.
+   *
+   * @param configId Task config ID.
+   * @param uris Resources Mesos Fetcher should place in sandbox.
+   */
+  void insertMesosFetcherUris(
+      @Param("configId") long configId,
+      @Param("uris") Set<IMesosFetcherURI> uris);
 
   /**
    * Deletes task configs.
@@ -185,4 +197,14 @@ interface TaskConfigMapper extends GarbageCollectedTableMapper {
   void insertResources(
       @Param("configId") long configId,
       @Param("values") List<Pair<Integer, String>> values);
+
+  /**
+   * Inserts a task's volume mounts.
+   *
+   * @param configId Task config ID.
+   * @param volumes Volumes to insert.
+   */
+  void insertVolumes(
+      @Param("configId") long configId,
+      @Param("volumes") List<IVolume> volumes);
 }

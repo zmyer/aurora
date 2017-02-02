@@ -13,6 +13,9 @@
  */
 package org.apache.aurora.scheduler.base;
 
+import java.util.Map;
+import java.util.Set;
+
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
@@ -24,9 +27,9 @@ import org.apache.aurora.gen.Container;
 import org.apache.aurora.gen.Container._Fields;
 import org.apache.aurora.gen.DockerContainer;
 import org.apache.aurora.gen.DockerParameter;
-import org.apache.aurora.gen.ExecutorConfig;
 import org.apache.aurora.gen.Identity;
 import org.apache.aurora.gen.LimitConstraint;
+import org.apache.aurora.gen.MesosFetcherURI;
 import org.apache.aurora.gen.Metadata;
 import org.apache.aurora.gen.Resource;
 import org.apache.aurora.gen.ScheduleStatus;
@@ -35,14 +38,21 @@ import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskConstraint;
 import org.apache.aurora.gen.TaskEvent;
 import org.apache.aurora.gen.ValueConstraint;
+import org.apache.aurora.gen.apiConstants;
 import org.apache.aurora.scheduler.TierInfo;
 import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.TierManager.TierManagerImpl.TierConfig;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager.ConfigurationManagerSettings;
+import org.apache.aurora.scheduler.configuration.executor.ExecutorConfig;
+import org.apache.aurora.scheduler.configuration.executor.ExecutorSettings;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
+import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
+import org.apache.mesos.Protos;
+import org.apache.mesos.Protos.ExecutorID;
+import org.apache.mesos.Protos.ExecutorInfo;
 
 /**
  * Convenience methods for working with tasks.
@@ -59,18 +69,41 @@ public final class TaskTestUtil {
       new TierInfo(true /* preemptible */, false /* revocable */);
   public static final TierInfo PREFERRED_TIER =
       new TierInfo(false /* preemptible */, false /* revocable */);
+  public static final String PROD_TIER_NAME = "tier-prod";
   public static final String DEV_TIER_NAME = "tier-dev";
-  public static final TierConfig DEV_TIER_CONFIG =
-      new TierConfig(ImmutableMap.of(DEV_TIER_NAME, DEV_TIER));
-  public static final TierManager DEV_TIER_MANAGER = taskConfig -> DEV_TIER;
+  public static final TierConfig TIER_CONFIG =
+      new TierConfig(DEV_TIER_NAME, ImmutableMap.of(
+          PROD_TIER_NAME, PREFERRED_TIER,
+          DEV_TIER_NAME, DEV_TIER
+      ));
+  public static final TierManager TIER_MANAGER = new TierManager.TierManagerImpl(TIER_CONFIG);
+  public static final ThriftBackfill THRIFT_BACKFILL = new ThriftBackfill(TIER_MANAGER);
   public static final ConfigurationManagerSettings CONFIGURATION_MANAGER_SETTINGS =
       new ConfigurationManagerSettings(
           ImmutableSet.of(_Fields.MESOS),
           false,
           ImmutableMultimap.of(),
+          true,
+          true,
+          true,
           true);
+  public static final ExecutorID EXECUTOR_ID = ExecutorID.newBuilder()
+      .setValue("PLACEHOLDER")
+      .build();
+  public static final ExecutorInfo EXECUTOR_INFO = ExecutorInfo.newBuilder()
+      .setExecutorId(EXECUTOR_ID)
+      .setName(apiConstants.AURORA_EXECUTOR_NAME)
+      .setCommand(Protos.CommandInfo.newBuilder().build()).build();
+  public static final ExecutorSettings EXECUTOR_SETTINGS = new ExecutorSettings(
+      ImmutableMap.<String, ExecutorConfig>builder()
+          .put(EXECUTOR_INFO.getName(), new ExecutorConfig(EXECUTOR_INFO, ImmutableList.of(), ""))
+          .build(),
+      false);
   public static final ConfigurationManager CONFIGURATION_MANAGER =
-      new ConfigurationManager(CONFIGURATION_MANAGER_SETTINGS, DEV_TIER_MANAGER);
+      new ConfigurationManager(CONFIGURATION_MANAGER_SETTINGS,
+          TIER_MANAGER,
+          THRIFT_BACKFILL,
+          EXECUTOR_SETTINGS);
 
   private TaskTestUtil() {
     // Utility class.
@@ -87,7 +120,7 @@ public final class TaskTestUtil {
         .setPriority(1)
         .setMaxTaskFailures(-1)
         .setProduction(true)
-        .setTier(DEV_TIER_NAME)
+        .setTier(PROD_TIER_NAME)
         .setConstraints(ImmutableSet.of(
             new Constraint(
                 "valueConstraint",
@@ -100,7 +133,12 @@ public final class TaskTestUtil {
         .setTaskLinks(ImmutableMap.of("http", "link", "admin", "otherLink"))
         .setContactEmail("foo@bar.com")
         .setMetadata(ImmutableSet.of(new Metadata("key", "value")))
-        .setExecutorConfig(new ExecutorConfig("name", "config"))
+        .setMesosFetcherUris(ImmutableSet.of(
+            new MesosFetcherURI("pathA").setExtract(true).setCache(true),
+            new MesosFetcherURI("pathB").setExtract(true).setCache(true)))
+        .setExecutorConfig(new org.apache.aurora.gen.ExecutorConfig(
+            EXECUTOR_INFO.getName(),
+            "config"))
         .setContainer(Container.docker(
             new DockerContainer("imagename")
                 .setParameters(ImmutableList.of(
@@ -148,5 +186,29 @@ public final class TaskTestUtil {
         .setStatus(status)
         .setScheduler("scheduler"));
     return IScheduledTask.build(builder);
+  }
+
+  public static String tierConfigFile() {
+    return "{\"default\": \"preemptible\","
+        + "\"tiers\":{"
+        + "\"preferred\": {\"revocable\": false, \"preemptible\": false},"
+        + "\"preemptible\": {\"revocable\": false, \"preemptible\": true},"
+        + "\"revocable\": {\"revocable\": true, \"preemptible\": true}"
+        + "}}";
+  }
+
+  public static Map<String, TierInfo> tierInfos() {
+    return ImmutableMap.of(
+        "preferred", PREFERRED_TIER,
+        "preemptible", DEV_TIER,
+        "revocable", REVOCABLE_TIER);
+  }
+
+  public static Set<org.apache.aurora.gen.TierConfig> tierConfigs() {
+    return ImmutableSet.of(
+        new org.apache.aurora.gen.TierConfig("preferred", PREFERRED_TIER.toMap()),
+        new org.apache.aurora.gen.TierConfig("preemptible", DEV_TIER.toMap()),
+        new org.apache.aurora.gen.TierConfig("revocable", REVOCABLE_TIER.toMap())
+    );
   }
 }

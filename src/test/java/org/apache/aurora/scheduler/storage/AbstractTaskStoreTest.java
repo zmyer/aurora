@@ -49,9 +49,12 @@ import org.apache.aurora.gen.HostAttributes;
 import org.apache.aurora.gen.Image;
 import org.apache.aurora.gen.MaintenanceMode;
 import org.apache.aurora.gen.MesosContainer;
+import org.apache.aurora.gen.MesosFetcherURI;
 import org.apache.aurora.gen.Metadata;
+import org.apache.aurora.gen.Mode;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskQuery;
+import org.apache.aurora.gen.Volume;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
@@ -174,6 +177,32 @@ public abstract class AbstractTaskStoreTest extends TearDownTestCase {
             new Metadata("package", "a"),
             new Metadata("package", "b")));
     IScheduledTask task = IScheduledTask.build(builder);
+    saveTasks(task);
+    assertStoreContents(task);
+  }
+
+  @Test
+  public void testSaveWithMesosFetcherUris() {
+    ScheduledTask builder = TASK_A.newBuilder();
+    builder.getAssignedTask().getTask().setMesosFetcherUris(
+        ImmutableSet.of(
+            new MesosFetcherURI("pathA").setExtract(true).setCache(true),
+            new MesosFetcherURI("pathB").setExtract(true).setCache(true)));
+    IScheduledTask task = IScheduledTask.build(builder);
+    saveTasks(task);
+    assertStoreContents(task);
+  }
+
+  @Test
+  public void testSaveWithContainerVolumes() {
+    ScheduledTask builder = TASK_B.newBuilder();
+    Image image = Image.docker(new DockerImage().setName("some-name").setTag("some-tag"));
+    List<Volume> volumes = ImmutableList.of(new Volume("container", "host", Mode.RO));
+    builder.getAssignedTask().getTask().getContainer().getMesos().setImage(image)
+        .setVolumes(volumes);
+
+    IScheduledTask task = IScheduledTask.build(builder);
+
     saveTasks(task);
     assertStoreContents(task);
   }

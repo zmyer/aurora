@@ -33,7 +33,6 @@ import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
@@ -51,7 +50,6 @@ import com.google.inject.name.Names;
 import com.google.inject.servlet.GuiceFilter;
 import com.google.inject.servlet.GuiceServletContextListener;
 import com.google.inject.util.Modules;
-import com.sun.jersey.api.container.filter.GZIPContentEncodingFilter;
 import com.sun.jersey.guice.JerseyServletModule;
 import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
 
@@ -88,8 +86,6 @@ import org.slf4j.LoggerFactory;
 
 import static java.util.Objects.requireNonNull;
 
-import static com.sun.jersey.api.core.ResourceConfig.PROPERTY_CONTAINER_REQUEST_FILTERS;
-import static com.sun.jersey.api.core.ResourceConfig.PROPERTY_CONTAINER_RESPONSE_FILTERS;
 import static com.sun.jersey.api.json.JSONConfiguration.FEATURE_POJO_MAPPING;
 
 /**
@@ -120,9 +116,7 @@ public class JettyServerModule extends AbstractModule {
   protected static final Arg<String> LISTEN_IP = Arg.create();
 
   public static final Map<String, String> GUICE_CONTAINER_PARAMS = ImmutableMap.of(
-      FEATURE_POJO_MAPPING, Boolean.TRUE.toString(),
-      PROPERTY_CONTAINER_REQUEST_FILTERS, GZIPContentEncodingFilter.class.getName(),
-      PROPERTY_CONTAINER_RESPONSE_FILTERS, GZIPContentEncodingFilter.class.getName());
+      FEATURE_POJO_MAPPING, Boolean.TRUE.toString());
 
   private static final String STATIC_ASSETS_ROOT = Resource
       .newClassPathResource("scheduler/assets/index.html")
@@ -203,21 +197,23 @@ public class JettyServerModule extends AbstractModule {
   };
 
   private static final Set<String> LEADER_ENDPOINTS = ImmutableSet.of(
+      "agents",
       "api",
       "cron",
-      "locks",
       "maintenance",
       "mname",
       "offers",
       "pendingtasks",
       "quotas",
       "slaves",
+      "tiers",
       "utilization"
   );
 
   private static final Multimap<Class<?>, String> JAX_RS_ENDPOINTS =
       ImmutableMultimap.<Class<?>, String>builder()
           .put(AbortHandler.class, "abortabortabort")
+          .put(Agents.class, "agents")
           .put(ContentionPrinter.class, "contention")
           .put(Cron.class, "cron")
           .put(HealthHandler.class, "health")
@@ -230,9 +226,9 @@ public class JettyServerModule extends AbstractModule {
           .put(QuitHandler.class, "quitquitquit")
           .put(Quotas.class, "quotas")
           .put(Services.class, "services")
-          .put(Slaves.class, "slaves")
           .put(StructDump.class, "structdump")
           .put(ThreadStackPrinter.class, "threads")
+          .put(Tiers.class, "tiers")
           .put(TimeSeriesDataSource.class, "graphdata")
           .put(Utilization.class, "utilization")
           .put(VarsHandler.class, "vars")
@@ -326,6 +322,7 @@ public class JettyServerModule extends AbstractModule {
             .put("/graphview(?:/index.html)?", "/assets/graphview/graphview.html")
             .put("/graphview/(.*)", "/assets/graphview/$1")
             .put("/(?:scheduler|updates)(?:/.*)?", "/assets/scheduler/index.html")
+            .put("/slaves", "/agents")
             .build();
 
     private static Handler getRewriteHandler(Handler wrapped) {
@@ -357,7 +354,7 @@ public class JettyServerModule extends AbstractModule {
     public HostAndPort getAddress() {
       Preconditions.checkState(state() == State.RUNNING);
       return HostAndPort.fromParts(
-          advertisedHostOverride.or(serverAddress.getHostText()),
+          advertisedHostOverride.or(serverAddress.getHost()),
           serverAddress.getPort());
     }
 
@@ -392,7 +389,7 @@ public class JettyServerModule extends AbstractModule {
         connector.open();
         server.start();
       } catch (Exception e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
 
       String host;

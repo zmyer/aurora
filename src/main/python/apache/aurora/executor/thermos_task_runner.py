@@ -77,7 +77,8 @@ class ThermosTaskRunner(TaskRunner):
                process_logger_mode=None,
                rotate_log_size_mb=None,
                rotate_log_backups=None,
-               preserve_env=False):
+               preserve_env=False,
+               mesos_containerizer_path=None):
     """
       runner_pex       location of the thermos_runner pex that this task runner should use
       task_id          task_id assigned by scheduler
@@ -89,6 +90,8 @@ class ThermosTaskRunner(TaskRunner):
       artifact_dir     scratch space for the thermos runner (basically cwd of thermos.pex)
       clock            clock
       preserve_env
+      mesos_containerizer_path path to the mesos-containerizer executable used to isolate a task's
+                               filesystem.
     """
     self._runner_pex = runner_pex
     self._task_id = task_id
@@ -97,7 +100,7 @@ class ThermosTaskRunner(TaskRunner):
     self._monitor = None
     self._status = None
     self._ports = portmap
-    self._root = sandbox.root
+    self._sandbox = sandbox
     self._checkpoint_root = checkpoint_root
     self._enable_chroot = sandbox.chrooted
     self._preserve_env = preserve_env
@@ -109,6 +112,7 @@ class ThermosTaskRunner(TaskRunner):
     self._process_logger_mode = process_logger_mode
     self._rotate_log_size_mb = rotate_log_size_mb
     self._rotate_log_backups = rotate_log_backups
+    self._mesos_containerizer_path = mesos_containerizer_path
 
     # wait events
     self._dead = threading.Event()
@@ -234,14 +238,11 @@ class ThermosTaskRunner(TaskRunner):
       log.error('Could not quitquitquit runner: %s' % e)
 
   def _cmdline(self):
-    host_sandbox = None
-    if os.environ.get('MESOS_DIRECTORY'):
-      host_sandbox = os.path.join(os.environ.get('MESOS_DIRECTORY'), 'sandbox')
-
     params = dict(log_dir=LogOptions.log_dir(),
                   log_to_disk='DEBUG',
                   checkpoint_root=self._checkpoint_root,
-                  sandbox=host_sandbox or self._root,
+                  sandbox=self._sandbox.root,
+                  container_sandbox=self._sandbox.container_root,
                   task_id=self._task_id,
                   thermos_json=self._task_filename,
                   hostname=self._hostname,
@@ -260,6 +261,8 @@ class ThermosTaskRunner(TaskRunner):
       cmdline_args.extend(['--enable_chroot'])
     if self._preserve_env:
       cmdline_args.extend(['--preserve_env'])
+    if self._sandbox.is_filesystem_image:
+      cmdline_args.extend(['--mesos_containerizer_path=%s' % self._mesos_containerizer_path])
     for name, port in self._ports.items():
       cmdline_args.extend(['--port=%s:%s' % (name, port)])
     return cmdline_args
@@ -365,7 +368,8 @@ class DefaultThermosTaskRunnerProvider(TaskRunnerProvider):
                process_logger_destination=None,
                process_logger_mode=None,
                rotate_log_size_mb=None,
-               rotate_log_backups=None):
+               rotate_log_backups=None,
+               mesos_containerizer_path=None):
     self._artifact_dir = artifact_dir or safe_mkdtemp()
     self._checkpoint_root = checkpoint_root
     self._preserve_env = preserve_env
@@ -379,11 +383,23 @@ class DefaultThermosTaskRunnerProvider(TaskRunnerProvider):
     self._process_logger_mode = process_logger_mode
     self._rotate_log_size_mb = rotate_log_size_mb
     self._rotate_log_backups = rotate_log_backups
+    self._mesos_containerizer_path = mesos_containerizer_path
 
   def _get_role(self, assigned_task):
     return None if assigned_task.task.container.docker else assigned_task.task.job.role
 
   def from_assigned_task(self, assigned_task, sandbox):
+    if sandbox.is_filesystem_image:
+      if self._mesos_containerizer_path is None:
+        raise TaskError('Cannot launch task using a filesystem image: no mesos_containerizer_path '
+            'was set.')
+      if not os.path.isfile(self._mesos_containerizer_path):
+        raise TaskError('Cannot launch task using a filesystem image: mesos_containerizer_path '
+            ' %s does not exist.' % self._mesos_containerizer_path)
+      if not os.access(self._mesos_containerizer_path, os.X_OK):
+        raise TaskError('Cannot launch task using a filesystem image: mesos_containerizer_path '
+                        ' %s is not marked as executable.' % self._mesos_containerizer_path)
+
     task_id = assigned_task.taskId
     role = self._get_role(assigned_task)
     try:
@@ -412,7 +428,8 @@ class DefaultThermosTaskRunnerProvider(TaskRunnerProvider):
         process_logger_mode=self._process_logger_mode,
         rotate_log_size_mb=self._rotate_log_size_mb,
         rotate_log_backups=self._rotate_log_backups,
-        preserve_env=self._preserve_env)
+        preserve_env=self._preserve_env,
+        mesos_containerizer_path=self._mesos_containerizer_path)
 
     return HttpLifecycleManager.wrap(runner, mesos_task, mesos_ports)
 

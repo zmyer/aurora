@@ -24,6 +24,7 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Inject;
 import javax.inject.Qualifier;
@@ -31,7 +32,6 @@ import javax.sql.DataSource;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Optional;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
@@ -93,6 +93,25 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
         && snapshot.isExperimentalTaskStore();
   }
 
+  private static final String DB_SCRIPT_FIELD = "dbscript";
+  private static final String LOCK_FIELD = "locks";
+  private static final String HOST_ATTRIBUTES_FIELD = "hosts";
+  private static final String QUOTA_FIELD = "quota";
+  private static final String TASK_FIELD = "tasks";
+  private static final String CRON_FIELD = "crons";
+  private static final String JOB_UPDATE_FIELD = "job_updates";
+  private static final String SCHEDULER_METADATA_FIELD = "scheduler_metadata";
+
+  /**
+   * Used by LogStorageModule to maintain legacy behavior for a change to snapshot format
+   * (and thus also backup processing) behavior. See AURORA-1861 for context.
+   */
+  static final Set<String> ALL_H2_STORE_FIELDS = ImmutableSet.of(
+      LOCK_FIELD,
+      HOST_ATTRIBUTES_FIELD,
+      QUOTA_FIELD,
+      JOB_UPDATE_FIELD);
+
   private final Iterable<SnapshotField> snapshotFields = Arrays.asList(
       // Order is critical here. The DB snapshot should always be tried first to ensure
       // graceful migration to DBTaskStore. Otherwise, there is a direct risk of losing the cluster.
@@ -105,6 +124,11 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
       // - If the above is not detected before a new snapshot is cut all tasks will be dropped the
       //   moment a new snapshot is created
       new SnapshotField() {
+        @Override
+        public String getName() {
+          return DB_SCRIPT_FIELD;
+        }
+
         @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
           LOG.info("Saving dbsnapshot");
@@ -122,7 +146,7 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
               }
             }
           } catch (SQLException e) {
-            Throwables.propagate(e);
+            throw new RuntimeException(e);
           }
         }
 
@@ -145,23 +169,30 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
                 }
               }
             } catch (SQLException e) {
-              Throwables.propagate(e);
+              throw new RuntimeException(e);
             }
 
             try {
               migrationManager.migrate();
             } catch (SQLException e) {
-              Throwables.propagate(e);
+              throw new RuntimeException(e);
             }
           }
         }
       },
       new SnapshotField() {
+        @Override
+        public String getName() {
+          return LOCK_FIELD;
+        }
+
         // It's important for locks to be replayed first, since there are relations that expect
         // references to be valid on insertion.
         @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
-          snapshot.setLocks(ILock.toBuildersSet(store.getLockStore().fetchLocks()));
+          if (hydrateSnapshotFields.contains(getName())) {
+            snapshot.setLocks(ILock.toBuildersSet(store.getLockStore().fetchLocks()));
+          }
         }
 
         @Override
@@ -182,9 +213,16 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
       },
       new SnapshotField() {
         @Override
+        public String getName() {
+          return HOST_ATTRIBUTES_FIELD;
+        }
+
+        @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
-          snapshot.setHostAttributes(
-              IHostAttributes.toBuildersSet(store.getAttributeStore().getHostAttributes()));
+          if (hydrateSnapshotFields.contains(getName())) {
+            snapshot.setHostAttributes(
+                IHostAttributes.toBuildersSet(store.getAttributeStore().getHostAttributes()));
+          }
         }
 
         @Override
@@ -205,6 +243,11 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
       },
       new SnapshotField() {
         @Override
+        public String getName() {
+          return TASK_FIELD;
+        }
+
+        @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
           snapshot.setTasks(
               IScheduledTask.toBuildersSet(store.getTaskStore().fetchTasks(Query.unscoped())));
@@ -222,11 +265,16 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
 
           if (snapshot.isSetTasks()) {
             store.getUnsafeTaskStore()
-                .saveTasks(ThriftBackfill.backfillTasks(snapshot.getTasks()));
+                .saveTasks(thriftBackfill.backfillTasks(snapshot.getTasks()));
           }
         }
       },
       new SnapshotField() {
+        @Override
+        public String getName() {
+          return CRON_FIELD;
+        }
+
         @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
           ImmutableSet.Builder<StoredCronJob> jobs = ImmutableSet.builder();
@@ -250,12 +298,17 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
           if (snapshot.isSetCronJobs()) {
             for (StoredCronJob job : snapshot.getCronJobs()) {
               store.getCronJobStore().saveAcceptedJob(
-                  ThriftBackfill.backfillJobConfiguration(job.getJobConfiguration()));
+                  thriftBackfill.backfillJobConfiguration(job.getJobConfiguration()));
             }
           }
         }
       },
       new SnapshotField() {
+        @Override
+        public String getName() {
+          return SCHEDULER_METADATA_FIELD;
+        }
+
         @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
           // SchedulerMetadata is updated outside of the static list of SnapshotFields
@@ -279,15 +332,22 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
       },
       new SnapshotField() {
         @Override
+        public String getName() {
+          return QUOTA_FIELD;
+        }
+
+        @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
-          ImmutableSet.Builder<QuotaConfiguration> quotas = ImmutableSet.builder();
-          for (Map.Entry<String, IResourceAggregate> entry
-              : store.getQuotaStore().fetchQuotas().entrySet()) {
+          if (hydrateSnapshotFields.contains(getName())) {
+            ImmutableSet.Builder<QuotaConfiguration> quotas = ImmutableSet.builder();
+            for (Map.Entry<String, IResourceAggregate> entry
+                : store.getQuotaStore().fetchQuotas().entrySet()) {
 
-            quotas.add(new QuotaConfiguration(entry.getKey(), entry.getValue().newBuilder()));
+              quotas.add(new QuotaConfiguration(entry.getKey(), entry.getValue().newBuilder()));
+            }
+
+            snapshot.setQuotaConfigurations(quotas.build());
           }
-
-          snapshot.setQuotaConfigurations(quotas.build());
         }
 
         @Override
@@ -309,8 +369,15 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
       },
       new SnapshotField() {
         @Override
+        public String getName() {
+          return JOB_UPDATE_FIELD;
+        }
+
+        @Override
         public void saveToSnapshot(MutableStoreProvider store, Snapshot snapshot) {
-          snapshot.setJobUpdateDetails(store.getJobUpdateStore().fetchAllJobUpdateDetails());
+          if (hydrateSnapshotFields.contains(getName())) {
+            snapshot.setJobUpdateDetails(store.getJobUpdateStore().fetchAllJobUpdateDetails());
+          }
         }
 
         @Override
@@ -327,7 +394,7 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
             for (StoredJobUpdateDetails storedDetails : snapshot.getJobUpdateDetails()) {
               JobUpdateDetails details = storedDetails.getDetails();
               updateStore.saveJobUpdate(
-                  ThriftBackfill.backFillJobUpdate(details.getUpdate()),
+                  thriftBackfill.backFillJobUpdate(details.getUpdate()),
                   Optional.fromNullable(storedDetails.getLockToken()));
 
               if (details.getUpdateEventsSize() > 0) {
@@ -355,7 +422,9 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
   private final Clock clock;
   private final Storage storage;
   private final boolean useDbSnapshotForTaskStore;
+  private final Set<String> hydrateSnapshotFields;
   private final MigrationManager migrationManager;
+  private final ThriftBackfill thriftBackfill;
 
   /**
    * Identifies if experimental task store is in use.
@@ -365,19 +434,31 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
   @Qualifier
   public @interface ExperimentalTaskStore { }
 
+  /**
+   * Identifies a set of snapshot fields to be fully hydrated when creating the snapshot.
+   */
+  @Retention(RetentionPolicy.RUNTIME)
+  @Target({ ElementType.PARAMETER, ElementType.METHOD })
+  @Qualifier
+  public @interface HydrateSnapshotFields { }
+
   @Inject
   public SnapshotStoreImpl(
       BuildInfo buildInfo,
       Clock clock,
       @Volatile Storage storage,
       @ExperimentalTaskStore boolean useDbSnapshotForTaskStore,
-      MigrationManager migrationManager) {
+      @HydrateSnapshotFields Set<String> hydrateSnapshotFields,
+      MigrationManager migrationManager,
+      ThriftBackfill thriftBackfill) {
 
     this.buildInfo = requireNonNull(buildInfo);
     this.clock = requireNonNull(clock);
     this.storage = requireNonNull(storage);
     this.useDbSnapshotForTaskStore = useDbSnapshotForTaskStore;
+    this.hydrateSnapshotFields = requireNonNull(hydrateSnapshotFields);
     this.migrationManager = requireNonNull(migrationManager);
+    this.thriftBackfill = requireNonNull(thriftBackfill);
   }
 
   @Timed("snapshot_create")
@@ -420,6 +501,8 @@ public class SnapshotStoreImpl implements SnapshotStore<Snapshot> {
   }
 
   private interface SnapshotField {
+    String getName();
+
     void saveToSnapshot(MutableStoreProvider storeProvider, Snapshot snapshot);
 
     void restoreFromSnapshot(MutableStoreProvider storeProvider, Snapshot snapshot);

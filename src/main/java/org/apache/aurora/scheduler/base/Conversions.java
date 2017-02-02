@@ -55,9 +55,22 @@ public final class Conversions {
           .put(TaskState.TASK_RUNNING, ScheduleStatus.RUNNING)
           .put(TaskState.TASK_FINISHED, ScheduleStatus.FINISHED)
           .put(TaskState.TASK_FAILED, ScheduleStatus.FAILED)
+          // N.B. the executor does not currently send TASK_KILLING, nor do we opt in to the
+          // framework capability to receive notifications of this state. We map TaskState.KILLING
+          // to ScheduleStatus.KILLED out of an abundance of caution, to avoid potentially
+          // unexpected behavior (since ScheduleStatus.KILLING is a transient state) should this be
+          // enabled in the future.
+          .put(TaskState.TASK_KILLING, ScheduleStatus.KILLED)
           .put(TaskState.TASK_KILLED, ScheduleStatus.KILLED)
           .put(TaskState.TASK_LOST, ScheduleStatus.LOST)
           .put(TaskState.TASK_ERROR, ScheduleStatus.LOST)
+          // Task states send to partition-aware Mesos frameworks. Aurora does not advertise the
+          // PARTITION_AWARE capability yet (AURORA-1814). We still map the task states to be safe.
+          .put(TaskState.TASK_UNREACHABLE, ScheduleStatus.LOST)
+          .put(TaskState.TASK_DROPPED, ScheduleStatus.LOST)
+          .put(TaskState.TASK_GONE, ScheduleStatus.LOST)
+          .put(TaskState.TASK_GONE_BY_OPERATOR, ScheduleStatus.LOST)
+          .put(TaskState.TASK_UNKNOWN, ScheduleStatus.LOST)
           .build();
 
   /**
@@ -68,7 +81,7 @@ public final class Conversions {
    */
   public static ScheduleStatus convertProtoState(TaskState taskState) {
     ScheduleStatus status = STATE_TRANSLATION.get(taskState);
-    Preconditions.checkArgument(status != null, "Unrecognized task state " + taskState);
+    Preconditions.checkArgument(status != null, "Unrecognized task state %s", taskState);
     return status;
   }
 

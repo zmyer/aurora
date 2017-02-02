@@ -21,6 +21,7 @@ import java.util.UUID;
 import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.collect.FluentIterable;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
@@ -43,7 +44,9 @@ import org.apache.aurora.gen.ResponseDetail;
 import org.apache.aurora.gen.Result;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskConfig;
+import org.apache.aurora.gen.apiConstants;
 import org.apache.aurora.scheduler.base.JobKeys;
+import org.apache.aurora.scheduler.base.TaskTestUtil;
 import org.apache.aurora.scheduler.quota.QuotaCheckResult;
 import org.apache.aurora.scheduler.resources.ResourceBag;
 import org.apache.aurora.scheduler.resources.ResourceTestUtil;
@@ -101,17 +104,19 @@ final class Fixtures {
         .setJob(JOB_KEY.newBuilder())
         .setOwner(IDENTITY)
         .setContactEmail("testing@twitter.com")
-        .setExecutorConfig(new ExecutorConfig("aurora", "data"))
+        .setExecutorConfig(new ExecutorConfig(apiConstants.AURORA_EXECUTOR_NAME, "data"))
         .setNumCpus(1)
         .setRamMb(1024)
         .setDiskMb(1024)
         .setProduction(production)
+        .setTier(production ? TaskTestUtil.PROD_TIER_NAME : TaskTestUtil.DEV_TIER_NAME)
         .setRequestedPorts(ImmutableSet.of())
         .setTaskLinks(ImmutableMap.of())
         .setMaxTaskFailures(1)
         .setConstraints(ImmutableSet.of())
         .setMetadata(ImmutableSet.of())
-        .setContainer(Container.mesos(new MesosContainer()))
+        .setMesosFetcherUris(ImmutableSet.of())
+        .setContainer(Container.mesos(new MesosContainer().setVolumes(ImmutableList.of())))
         .setResources(ImmutableSet.of(
             Resource.numCpus(1),
             Resource.ramMb(1024),

@@ -13,6 +13,7 @@
  */
 package org.apache.aurora.scheduler.state;
 
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
@@ -21,9 +22,11 @@ import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 
 import org.apache.aurora.common.inject.TimedInterceptor.Timed;
-import org.apache.aurora.common.stats.Stats;
+import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.scheduler.HostOffer;
 import org.apache.aurora.scheduler.TierInfo;
 import org.apache.aurora.scheduler.TierManager;
@@ -60,15 +63,15 @@ public interface TaskAssigner {
    * @param storeProvider Storage provider.
    * @param resourceRequest The request for resources being scheduled.
    * @param groupKey Task group key.
-   * @param taskId Task id to assign.
+   * @param taskIds Task IDs to assign.
    * @param slaveReservations Slave reservations.
-   * @return Assignment result.
+   * @return Successfully assigned task IDs.
    */
-  boolean maybeAssign(
+  Set<String> maybeAssign(
       MutableStoreProvider storeProvider,
       ResourceRequest resourceRequest,
       TaskGroupKey groupKey,
-      String taskId,
+      Iterable<String> taskIds,
       Map<String, TaskGroupKey> slaveReservations);
 
   class TaskAssignerImpl implements TaskAssigner {
@@ -77,8 +80,13 @@ public interface TaskAssigner {
     @VisibleForTesting
     static final Optional<String> LAUNCH_FAILED_MSG =
         Optional.of("Unknown exception attempting to schedule task.");
+    @VisibleForTesting
+    static final String ASSIGNER_LAUNCH_FAILURES = "assigner_launch_failures";
+    @VisibleForTesting
+    static final String ASSIGNER_EVALUATED_OFFERS = "assigner_evaluated_offers";
 
-    private final AtomicLong launchFailures = Stats.exportLong("assigner_launch_failures");
+    private final AtomicLong launchFailures;
+    private final AtomicLong evaluatedOffers;
 
     private final StateManager stateManager;
     private final SchedulingFilter filter;
@@ -92,13 +100,16 @@ public interface TaskAssigner {
         SchedulingFilter filter,
         MesosTaskFactory taskFactory,
         OfferManager offerManager,
-        TierManager tierManager) {
+        TierManager tierManager,
+        StatsProvider statsProvider) {
 
       this.stateManager = requireNonNull(stateManager);
       this.filter = requireNonNull(filter);
       this.taskFactory = requireNonNull(taskFactory);
       this.offerManager = requireNonNull(offerManager);
       this.tierManager = requireNonNull(tierManager);
+      this.launchFailures = statsProvider.makeCounter(ASSIGNER_LAUNCH_FAILURES);
+      this.evaluatedOffers = statsProvider.makeCounter(ASSIGNER_EVALUATED_OFFERS);
     }
 
     @VisibleForTesting
@@ -125,21 +136,32 @@ public interface TaskAssigner {
           offer.getSlaveId(),
           task -> mapAndAssignResources(offer, task));
       LOG.info(
-          "Offer on slave {} (id {}) is being assigned task for {}.",
+          "Offer on agent {} (id {}) is being assigned task for {}.",
           host, offer.getSlaveId().getValue(), taskId);
       return taskFactory.createFrom(assigned, offer);
     }
 
     @Timed("assigner_maybe_assign")
     @Override
-    public boolean maybeAssign(
+    public Set<String> maybeAssign(
         MutableStoreProvider storeProvider,
         ResourceRequest resourceRequest,
         TaskGroupKey groupKey,
-        String taskId,
+        Iterable<String> taskIds,
         Map<String, TaskGroupKey> slaveReservations) {
 
+      if (Iterables.isEmpty(taskIds)) {
+        return ImmutableSet.of();
+      }
+
+      TierInfo tierInfo = tierManager.getTier(groupKey.getTask());
+      ImmutableSet.Builder<String> assignmentResult = ImmutableSet.builder();
+      Iterator<String> remainingTasks = taskIds.iterator();
+      String taskId = remainingTasks.next();
+
       for (HostOffer offer : offerManager.getOffers(groupKey)) {
+        evaluatedOffers.incrementAndGet();
+
         Optional<TaskGroupKey> reservedGroup = Optional.fromNullable(
             slaveReservations.get(offer.getOffer().getSlaveId().getValue()));
 
@@ -148,7 +170,6 @@ public interface TaskAssigner {
           continue;
         }
 
-        TierInfo tierInfo = tierManager.getTier(groupKey.getTask());
         Set<Veto> vetoes = filter.filter(
             new UnusedResource(offer.getResourceBag(tierInfo), offer.getAttributes()),
             resourceRequest);
@@ -159,9 +180,17 @@ public interface TaskAssigner {
               offer.getOffer(),
               taskId);
 
+          resourceRequest.getJobState().updateAttributeAggregate(offer.getAttributes());
+
           try {
             offerManager.launchTask(offer.getOffer().getId(), taskInfo);
-            return true;
+            assignmentResult.add(taskId);
+
+            if (remainingTasks.hasNext()) {
+              taskId = remainingTasks.next();
+            } else {
+              break;
+            }
           } catch (OfferManager.LaunchException e) {
             LOG.warn("Failed to launch task.", e);
             launchFailures.incrementAndGet();
@@ -177,19 +206,18 @@ public interface TaskAssigner {
                 Optional.of(PENDING),
                 LOST,
                 LAUNCH_FAILED_MSG);
-            return false;
+            break;
           }
         } else {
           if (Veto.identifyGroup(vetoes) == VetoGroup.STATIC) {
             // Never attempt to match this offer/groupKey pair again.
             offerManager.banOffer(offer.getOffer().getId(), groupKey);
           }
-
-          LOG.debug("Slave " + offer.getOffer().getHostname()
-              + " vetoed task " + taskId + ": " + vetoes);
+          LOG.debug("Agent {} vetoed task {}: {}", offer.getOffer().getHostname(), taskId, vetoes);
         }
       }
-      return false;
+
+      return assignmentResult.build();
     }
   }
 }

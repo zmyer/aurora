@@ -42,12 +42,15 @@ class AuroraExecutor(ExecutorBase, Observable):
   STOP_TIMEOUT = Amount(2, Time.MINUTES)
   STOP_WAIT = Amount(5, Time.SECONDS)
 
-  def __init__(self,
-               runner_provider,
-               status_manager_class=StatusManager,
-               sandbox_provider=DefaultSandboxProvider(),
-               status_providers=(),
-               clock=time):
+  def __init__(
+      self,
+      runner_provider,
+      status_manager_class=StatusManager,
+      sandbox_provider=DefaultSandboxProvider(),
+      status_providers=(),
+      clock=time,
+      no_sandbox_create_user=False,
+      sandbox_mount_point=None):
 
     ExecutorBase.__init__(self)
     if not isinstance(runner_provider, TaskRunnerProvider):
@@ -62,6 +65,8 @@ class AuroraExecutor(ExecutorBase, Observable):
     self._status_manager_class = status_manager_class
     self._sandbox = None
     self._sandbox_provider = sandbox_provider
+    self._no_sandbox_create_user = no_sandbox_create_user
+    self._sandbox_mount_point = sandbox_mount_point
     self._kill_manager = KillManager()
     # Events that are exposed for interested entities
     self.runner_aborted = threading.Event()
@@ -81,7 +86,7 @@ class AuroraExecutor(ExecutorBase, Observable):
     self.send_update(driver, self._task_id, status, msg)
     defer(driver.stop, delay=self.STOP_WAIT)
 
-  def _run(self, driver, assigned_task):
+  def _run(self, driver, assigned_task, mounted_volume_paths):
     """
       Commence running a Task.
         - Initialize the sandbox
@@ -91,7 +96,7 @@ class AuroraExecutor(ExecutorBase, Observable):
     """
     self.send_update(driver, self._task_id, mesos_pb2.TASK_STARTING, 'Initializing sandbox.')
 
-    if not self._initialize_sandbox(driver, assigned_task):
+    if not self._initialize_sandbox(driver, assigned_task, mounted_volume_paths):
       return
 
     # start the process on a separate thread and give the message processing thread back
@@ -110,16 +115,18 @@ class AuroraExecutor(ExecutorBase, Observable):
     if not self._start_runner(driver, assigned_task):
       return
 
-    self.send_update(driver, self._task_id, mesos_pb2.TASK_RUNNING)
-
     try:
       self._start_status_manager(driver, assigned_task)
     except Exception:
       log.error(traceback.format_exc())
       self._die(driver, mesos_pb2.TASK_FAILED, "Internal error")
 
-  def _initialize_sandbox(self, driver, assigned_task):
-    self._sandbox = self._sandbox_provider.from_assigned_task(assigned_task)
+  def _initialize_sandbox(self, driver, assigned_task, mounted_volume_paths):
+    self._sandbox = self._sandbox_provider.from_assigned_task(
+        assigned_task,
+        no_create_user=self._no_sandbox_create_user,
+        mounted_volume_paths=mounted_volume_paths,
+        sandbox_mount_point=self._sandbox_mount_point)
     self.sandbox_initialized.set()
     try:
       propagate_deadline(self._sandbox.create, timeout=self.SANDBOX_INITIALIZATION_TIMEOUT)
@@ -170,9 +177,16 @@ class AuroraExecutor(ExecutorBase, Observable):
     # chain the runner to the other checkers, but do not chain .start()/.stop()
     complete_checker = ChainedStatusChecker([self._runner, self._chained_checker])
     self._status_manager = self._status_manager_class(
-        complete_checker, self._shutdown, clock=self._clock)
+        complete_checker,
+        self._signal_running,
+        self._shutdown,
+        clock=self._clock)
     self._status_manager.start()
     self.status_manager_started.set()
+
+  def _signal_running(self, status_result):
+    log.info('Send TASK_RUNNING status update. status: %s' % status_result)
+    self.send_update(self._driver, self._task_id, mesos_pb2.TASK_RUNNING, status_result.reason)
 
   def _signal_kill_manager(self, driver, task_id, reason):
     if self._task_id is None:
@@ -230,6 +244,13 @@ class AuroraExecutor(ExecutorBase, Observable):
       log.fatal(traceback.format_exc())
       return None
 
+  @classmethod
+  def extract_mount_paths_from_task(cls, task):
+    if task.executor and task.executor.container:
+      return [v.container_path for v in task.executor.container.volumes]
+
+    return None
+
   """ Mesos Executor API methods follow """
 
   def launchTask(self, driver, task):
@@ -239,6 +260,7 @@ class AuroraExecutor(ExecutorBase, Observable):
       however, no other callbacks will be invoked on this executor until this callback has returned.
     """
     self.launched.set()
+    self.log('TaskInfo: %s' % task)
     self.log('launchTask got task: %s:%s' % (task.name, task.task_id.value))
 
     # TODO(wickman)  Update the tests to call registered(), then remove this line and issue
@@ -255,13 +277,14 @@ class AuroraExecutor(ExecutorBase, Observable):
     self._task_id = task.task_id.value
 
     assigned_task = self.validate_task(task)
+    self.log("Assigned task: %s" % assigned_task)
     if not assigned_task:
       self.send_update(driver, self._task_id, mesos_pb2.TASK_FAILED,
           'Could not deserialize task.')
       defer(driver.stop, delay=self.STOP_WAIT)
       return
 
-    defer(lambda: self._run(driver, assigned_task))
+    defer(lambda: self._run(driver, assigned_task, self.extract_mount_paths_from_task(task)))
 
   def killTask(self, driver, task_id):
     """

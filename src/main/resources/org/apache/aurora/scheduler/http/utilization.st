@@ -13,7 +13,7 @@
  -->
  <html>
   <head>
-    <title>Aurora $cluster_name$ slaves</title>
+    <title>Aurora $cluster_name$ utilization</title>
     <link href="/assets/bower_components/bootstrap/dist/css/bootstrap.min.css" rel="stylesheet" />
   </head>
   <body>
@@ -35,8 +35,8 @@
             $metric.title$
           $endif$
           <td>$metric.cpu$
-          <td>$metric.ramGb$ GB
-          <td>$metric.diskGb$ GB
+          <td>$metric.ram$ MB
+          <td>$metric.disk$ MB
         </tr>
         }$
       </tbody>

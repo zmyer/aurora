@@ -46,6 +46,7 @@ import org.apache.aurora.common.util.BackoffStrategy;
 import org.apache.aurora.gen.ServerInfo;
 import org.apache.aurora.scheduler.AppStartup;
 import org.apache.aurora.scheduler.SchedulerServicesModule;
+import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.app.LifecycleModule;
 import org.apache.aurora.scheduler.app.ServiceGroupMonitor;
 import org.apache.aurora.scheduler.async.AsyncModule;
@@ -53,6 +54,7 @@ import org.apache.aurora.scheduler.cron.CronJobManager;
 import org.apache.aurora.scheduler.http.api.GsonMessageBodyHandler;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.scheduling.RescheduleCalculator;
+import org.apache.aurora.scheduler.scheduling.TaskGroups;
 import org.apache.aurora.scheduler.scheduling.TaskGroups.TaskGroupsSettings;
 import org.apache.aurora.scheduler.scheduling.TaskScheduler;
 import org.apache.aurora.scheduler.state.LockManager;
@@ -118,14 +120,17 @@ public abstract class AbstractJettyTest extends EasyMockTest {
                 new TaskGroupsSettings(
                     Amount.of(1L, Time.MILLISECONDS),
                     bindMock(BackoffStrategy.class),
-                    RateLimiter.create(1000)));
+                    RateLimiter.create(1000),
+                    5));
             bind(ServiceGroupMonitor.class).toInstance(serviceGroupMonitor);
             bindMock(CronJobManager.class);
             bindMock(LockManager.class);
             bindMock(OfferManager.class);
             bindMock(RescheduleCalculator.class);
             bindMock(TaskScheduler.class);
+            bindMock(TierManager.class);
             bindMock(Thread.UncaughtExceptionHandler.class);
+            bindMock(TaskGroups.TaskGroupBatchWorker.class);
 
             bind(ServletContextListener.class).toProvider(() -> {
               return makeServletContextListener(injector, getChildServletModule());
@@ -171,6 +176,12 @@ public abstract class AbstractJettyTest extends EasyMockTest {
 
   protected String makeUrl(String path) {
     return String.format("http://%s:%s%s", httpServer.getHostText(), httpServer.getPort(), path);
+  }
+
+  protected WebResource.Builder getPlainRequestBuilder(String path) {
+    assertNotNull("HTTP server must be started first", httpServer);
+    Client client = Client.create(new DefaultClientConfig());
+    return client.resource(makeUrl(path)).getRequestBuilder();
   }
 
   protected WebResource.Builder getRequestBuilder(String path) {

@@ -167,10 +167,13 @@
 
           getJobUpdateDetails: function (updateKey) {
             return async(function (deferred) {
-              auroraClient.getSchedulerClient().getJobUpdateDetails(updateKey, function (response) {
+              var schedulerClient = auroraClient.getSchedulerClient();
+              var query = new JobUpdateQuery();
+              query.key = updateKey;
+              schedulerClient.getJobUpdateDetails(null, query, function (response) {
                 var result = auroraClient.processResponse(response);
                 result.details = response.result !== null ?
-                  response.result.getJobUpdateDetailsResult.details : {};
+                  response.result.getJobUpdateDetailsResult.detailsList[0] : {};
                 deferred.resolve(result);
               });
             });
@@ -435,6 +438,7 @@
             resources: task.resources,
             isService: task.isService,
             production: task.production,
+            tier: task.tier,
             contact: task.contactEmail || '',
             constraints: constraints,
             metadata: metadata,

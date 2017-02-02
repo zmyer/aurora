@@ -17,6 +17,8 @@ import java.util.Set;
 
 import com.google.common.base.Function;
 import com.google.common.collect.FluentIterable;
+import com.google.common.collect.ImmutableSet;
+import com.google.inject.Inject;
 
 import org.apache.aurora.common.util.BuildInfo;
 import org.apache.aurora.common.util.testing.FakeClock;
@@ -29,6 +31,9 @@ import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
 import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.log.SnapshotStoreImpl;
+import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
+
+import static java.util.Objects.requireNonNull;
 
 import static org.apache.aurora.common.util.testing.FakeBuildInfo.generateBuildInfo;
 
@@ -64,6 +69,14 @@ interface TemporaryStorage {
    * A factory that creates temporary storage instances, detached from the rest of the system.
    */
   class TemporaryStorageFactory implements Function<Snapshot, TemporaryStorage> {
+
+    private final ThriftBackfill thriftBackfill;
+
+    @Inject
+    TemporaryStorageFactory(ThriftBackfill thriftBackfill) {
+      this.thriftBackfill = requireNonNull(thriftBackfill);
+    }
+
     @Override
     public TemporaryStorage apply(Snapshot snapshot) {
       final Storage storage = DbUtil.createFlaggedStorage();
@@ -77,9 +90,13 @@ interface TemporaryStorage {
           // Safe to pass false here to default to the non-experimental task store
           // during restore from backup procedure.
           false /** useDbSnapshotForTaskStore */,
+          // Safe to pass empty set here because during backup restore we are not deciding which
+          // fields to write to the snapshot.
+          ImmutableSet.of() /** hydrateFields */,
           // We can just pass an empty lambda for the MigrationManager as migration is a no-op
           // when restoring from backup.
-          () -> { } /** migrationManager */);
+          () -> { } /** migrationManager */,
+          thriftBackfill);
       snapshotStore.applySnapshot(snapshot);
 
       return new TemporaryStorage() {
