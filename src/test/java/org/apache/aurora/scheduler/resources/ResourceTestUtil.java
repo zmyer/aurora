@@ -14,10 +14,10 @@
 package org.apache.aurora.scheduler.resources;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 
@@ -28,8 +28,8 @@ import org.apache.aurora.scheduler.base.Numbers;
 import org.apache.aurora.scheduler.storage.entities.IResource;
 import org.apache.aurora.scheduler.storage.entities.IResourceAggregate;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.mesos.Protos;
-import org.apache.mesos.Protos.Value.Type;
+import org.apache.mesos.v1.Protos;
+import org.apache.mesos.v1.Protos.Value.Type;
 
 import static org.apache.aurora.gen.Resource.diskMb;
 import static org.apache.aurora.gen.Resource.numCpus;
@@ -63,8 +63,7 @@ public final class ResourceTestUtil {
   }
 
   public static ITaskConfig resetPorts(ITaskConfig config, Set<String> portNames) {
-    TaskConfig builder = config.newBuilder()
-        .setRequestedPorts(portNames);
+    TaskConfig builder = config.newBuilder();
     builder.getResources().removeIf(e -> fromResource(IResource.build(e)).equals(PORTS));
     portNames.forEach(e -> builder.addToResources(Resource.namedPort(e)));
     return ITaskConfig.build(builder);
@@ -80,11 +79,11 @@ public final class ResourceTestUtil {
   }
 
   public static Protos.Resource mesosScalar(ResourceType type, double value) {
-    return mesosScalar(type, Optional.absent(), false, value);
+    return mesosScalar(type, Optional.empty(), false, value);
   }
 
   public static Protos.Resource mesosScalar(ResourceType type, double value, boolean revocable) {
-    return mesosScalar(type, Optional.absent(), revocable, value);
+    return mesosScalar(type, Optional.empty(), revocable, value);
   }
 
   public static Protos.Resource mesosScalar(
@@ -99,7 +98,7 @@ public final class ResourceTestUtil {
   }
 
   public static Protos.Resource mesosRange(ResourceType type, Integer... values) {
-    return mesosRange(type, Optional.absent(), values);
+    return mesosRange(type, Optional.empty(), values);
   }
 
   public static Protos.Resource mesosRange(
@@ -133,10 +132,14 @@ public final class ResourceTestUtil {
   }
 
   public static Protos.Offer offer(Protos.Resource... resources) {
+    return offer("slave-id", resources);
+  }
+
+  public static Protos.Offer offer(String agentId, Protos.Resource... resources) {
     return Protos.Offer.newBuilder()
-        .setId(Protos.OfferID.newBuilder().setValue("offer-id"))
+        .setId(Protos.OfferID.newBuilder().setValue("offer-id-" + agentId))
         .setFrameworkId(Protos.FrameworkID.newBuilder().setValue("framework-id"))
-        .setSlaveId(Protos.SlaveID.newBuilder().setValue("slave-id"))
+        .setAgentId(Protos.AgentID.newBuilder().setValue(agentId))
         .setHostname("hostname")
         .addAllResources(ImmutableSet.copyOf(resources)).build();
   }

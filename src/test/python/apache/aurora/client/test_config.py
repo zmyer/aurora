@@ -97,6 +97,30 @@ def test_get_config_with_broken_subscopes():
   assert 'Unexpected unbound refs' in str(cm.value.message)
 
 
+def test_get_config_primary_port_warning(capsys):
+  config_unbound_primary_port = MESOS_CONFIG_BASE % {
+    'cmdline': 'echo {{thermos.ports[http]}}',
+    'announce': 'announce = Announcer(primary_port = "custom", portmap = {}),'
+  }
+  get_aurora_config('hello_world', BytesIO(config_unbound_primary_port)).job()
+  _, err = capsys.readouterr()
+
+  msg = "Announcer specified primary port as 'custom' but no processes have bound that port"
+  assert msg in err
+
+
+def test_get_config_mapped_primary_port(capsys):
+  config_mapped_primary_port = MESOS_CONFIG_BASE % {
+    'cmdline': 'echo {{thermos.ports[custom]}}',
+    'announce': 'announce = Announcer(primary_port = "http", portmap = {"http": "custom"}),'
+  }
+  get_aurora_config('hello_world', BytesIO(config_mapped_primary_port)).job()
+  out, err = capsys.readouterr()
+
+  assert err == ""  # No warning about unbound primary port
+  assert out == ""
+
+
 def test_get_config_select():
   bio = BytesIO(MESOS_CONFIG_WITHOUT_ANNOUNCE)
 
@@ -139,25 +163,6 @@ def test_include():
         hello_include_fname_fp.seek(0)
         with pytest.raises(AuroraConfigLoader.InvalidConfigError):
           get_aurora_config('hello_world', hello_include_fname_fp)
-
-
-BAD_ENV = ('Prod', ' prod', 'prod ', 'tEst', 'production', 'staging 2', 'stagingA')
-GOOD_ENV = ('prod', 'devel', 'test', 'staging', 'staging001', 'staging1', 'staging1234')
-
-
-def test_environment_names():
-  base_job = Job(
-      name='hello_world', role='john_doe', cluster='test-cluster',
-      task=Task(name='main', processes=[],
-                resources=Resources(cpu=0.1, ram=64 * MB, disk=64 * MB)))
-
-  with pytest.raises(ValueError):
-    config._validate_environment_name(AuroraConfig(base_job))
-  for env_name in GOOD_ENV:
-    config._validate_environment_name(AuroraConfig(base_job(environment=env_name)))
-  for env_name in BAD_ENV:
-    with pytest.raises(ValueError):
-      config._validate_environment_name(AuroraConfig(base_job(environment=env_name)))
 
 
 def test_dedicated_portmap():

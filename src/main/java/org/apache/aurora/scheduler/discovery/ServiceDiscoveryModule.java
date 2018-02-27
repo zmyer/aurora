@@ -17,6 +17,9 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import javax.inject.Singleton;
 
@@ -25,7 +28,6 @@ import com.google.common.io.Files;
 import com.google.common.util.concurrent.AbstractIdleService;
 import com.google.inject.AbstractModule;
 import com.google.inject.Inject;
-import com.google.inject.Module;
 import com.google.inject.Provider;
 import com.google.inject.Provides;
 import com.google.inject.binder.LinkedBindingBuilder;
@@ -77,20 +79,12 @@ public class ServiceDiscoveryModule extends AbstractModule {
       bind(ZooKeeperTestServer.class).toInstance(new ZooKeeperTestServer(tempDir, tempDir));
       SchedulerServicesModule.addAppStartupServiceBinding(binder()).to(TestServerService.class);
 
-      clusterBinder.toProvider(LocalZooKeeperClusterProvider.class);
+      clusterBinder.toProvider(LocalZooKeeperClusterProvider.class).in(Singleton.class);
     } else {
       clusterBinder.toInstance(zooKeeperConfig.getServers());
     }
 
-    install(discoveryModule());
-  }
-
-  private Module discoveryModule() {
-    if (zooKeeperConfig.isUseCurator()) {
-      return new CuratorServiceDiscoveryModule(discoveryPath, zooKeeperConfig);
-    } else {
-      return new CommonsServiceDiscoveryModule(discoveryPath, zooKeeperConfig);
-    }
+    install(new CuratorServiceDiscoveryModule(discoveryPath, zooKeeperConfig));
   }
 
   @Provides
@@ -125,7 +119,10 @@ public class ServiceDiscoveryModule extends AbstractModule {
 
     @Override
     protected void shutDown() {
-      testServer.stop();
+      // Delay stopping ZooKeeper server to ensure that clients close first during service shutdown.
+      ScheduledExecutorService executorService = Executors.newScheduledThreadPool(0);
+      executorService.schedule(() -> testServer.stop(), 1000, TimeUnit.MILLISECONDS);
+      executorService.shutdown();
     }
   }
 

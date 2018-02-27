@@ -18,15 +18,16 @@ set -eux
 date
 
 # Run all Java tests
-./gradlew -Pq clean build
+./gradlew --no-daemon -Pq clean build
 
 # Run Python import ordering check
 ./build-support/python/isort-check
 
 # Run remaining Python style checks and all tests
 ./build-support/python/checkstyle-check
-./pants test.pytest --junit-xml-dir="$PWD/dist/test-results" \
-  src/{main,test}/python:: -- -v
+# AURORA-1972: As a workaround for spuriously failing tests, test different
+# targets in isolation
+./pants test.pytest --no-test-pytest-fast src/test/python:: -- -v
 
 # Ensure we can build python sdists (AURORA-1174)
 ./build-support/release/make-python-sdists

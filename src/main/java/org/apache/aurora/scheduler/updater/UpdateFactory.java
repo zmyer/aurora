@@ -13,10 +13,11 @@
  */
 package org.apache.aurora.scheduler.updater;
 
+import java.io.Serializable;
+import java.util.Optional;
 import java.util.Set;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.collect.DiscreteDomain;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -83,12 +84,12 @@ interface UpdateFactory {
           settings.getUpdateGroupSize() > 0,
           "Update group size must be positive.");
 
+      Set<Integer> currentInstances = expandInstanceIds(instructions.getInitialState());
       Set<Integer> desiredInstances = instructions.isSetDesiredState()
           ? expandInstanceIds(ImmutableSet.of(instructions.getDesiredState()))
           : ImmutableSet.of();
 
-      Set<Integer> instances = ImmutableSet.copyOf(
-          Sets.union(expandInstanceIds(instructions.getInitialState()), desiredInstances));
+      Set<Integer> instances = ImmutableSet.copyOf(Sets.union(currentInstances, desiredInstances));
 
       ImmutableMap.Builder<Integer, StateEvaluator<Optional<IScheduledTask>>> evaluators =
           ImmutableMap.builder();
@@ -97,7 +98,7 @@ interface UpdateFactory {
         if (rollingForward) {
           desiredStateConfig = desiredInstances.contains(instanceId)
               ? Optional.of(instructions.getDesiredState().getTask())
-              : Optional.absent();
+              : Optional.empty();
         } else {
           desiredStateConfig = getConfig(instanceId, instructions.getInitialState());
         }
@@ -111,9 +112,10 @@ interface UpdateFactory {
                 clock));
       }
 
+      Ordering<Integer> updateOrdering = new UpdateOrdering(currentInstances, desiredInstances);
       Ordering<Integer> updateOrder = rollingForward
-          ? Ordering.natural()
-          : Ordering.natural().reverse();
+          ? updateOrdering
+          : updateOrdering.reverse();
 
       UpdateStrategy<Integer> strategy = settings.isWaitForBatchCompletion()
           ? new BatchStrategy<>(updateOrder, settings.getUpdateGroupSize())
@@ -150,7 +152,63 @@ interface UpdateFactory {
         }
       }
 
-      return Optional.absent();
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * An instance ID ordering that prefers to create new instances first, then update existing
+   * instances, and finally kill instances.
+   */
+  @VisibleForTesting
+  class UpdateOrdering extends Ordering<Integer> implements Serializable {
+    /**
+     * Associates an instance ID to an action (create, update, or kill) priority.
+     */
+    private final ImmutableMap<Integer, Integer> instanceToActionPriority;
+
+    /**
+     * Creates an {@link UpdateOrdering}. Determines the action of the instance (create, update, or
+     * kill) by comparing the current instance IDs against the desired instance IDs after the
+     * update.
+     *
+     * @param currentInstances The current instance IDs.
+     * @param desiredInstances The desired instance IDs after the update.
+     */
+    UpdateOrdering(Set<Integer> currentInstances, Set<Integer> desiredInstances) {
+      requireNonNull(desiredInstances);
+      requireNonNull(currentInstances);
+
+      Set<Integer> toCreate = Sets.difference(desiredInstances, currentInstances);
+      Set<Integer> toUpdate = Sets.intersection(desiredInstances, currentInstances);
+      Set<Integer> toKill = Sets.difference(currentInstances, desiredInstances);
+
+      // Build a mapping of ordering priority (lower is more important) to the instance action
+      // group. Then, we invert it for easy lookup of instance ID to priority.
+      ImmutableMap.Builder<Integer, Integer> builder = new ImmutableMap.Builder<>();
+      ImmutableMap.of(
+          1, toCreate,
+          2, toUpdate,
+          3, toKill
+      ).forEach((priority, instances) -> instances.forEach(id -> builder.put(id, priority)));
+      this.instanceToActionPriority = builder.build();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int compare(Integer a, Integer b) {
+      Integer aActionPriority = instanceToActionPriority.get(a);
+      Integer bActionPriority = instanceToActionPriority.get(b);
+
+      // Try to order by the instance's action.
+      if (!aActionPriority.equals(bActionPriority)) {
+        return Integer.compare(aActionPriority, bActionPriority);
+      }
+
+      // If it is the same action, order the IDs numerically.
+      return Integer.compare(a, b);
     }
   }
 

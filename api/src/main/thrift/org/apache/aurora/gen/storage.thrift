@@ -28,10 +28,12 @@ struct SaveCronJob {
   2: api.JobConfiguration jobConfig
 }
 
+// TODO(jly): Deprecated, remove in 0.21. See AURORA-1959.
 struct SaveLock {
   1: api.Lock lock
 }
 
+// TODO(jly): Deprecated, remove in 0.21. See AURORA-1959.
 struct RemoveLock {
   1: api.LockKey lockKey
 }
@@ -42,11 +44,6 @@ struct RemoveJob {
 
 struct SaveTasks {
   1: set<api.ScheduledTask> tasks
-}
-
-struct RewriteTask {
-  1: string taskId
-  2: api.TaskConfig task
 }
 
 struct RemoveTasks {
@@ -68,13 +65,16 @@ struct SaveHostAttributes {
 
 struct SaveJobUpdate {
   1: api.JobUpdate jobUpdate
-  2: string lockToken
+  // 2: deleted
+}
+
+struct RemoveJobUpdates {
+  1: set<api.JobUpdateKey> keys
 }
 
 struct StoredJobUpdateDetails {
   1: api.JobUpdateDetails details
-  /** ID of the lock associated with this update. */
-  2: string lockToken
+  // 2: deleted
 }
 
 struct SaveJobUpdateEvent {
@@ -101,13 +101,14 @@ union Op {
   8: SaveQuota saveQuota
   9: RemoveQuota removeQuota
   10: SaveHostAttributes saveHostAttributes
-  11: RewriteTask rewriteTask
-  12: SaveLock saveLock
-  13: RemoveLock removeLock
+  // 11: removed
+  12: SaveLock saveLock // TODO(jly): Deprecated, remove in 0.21. See AURORA-1959.
+  13: RemoveLock removeLock // TODO(jly): Deprecated, remove in 0.21. See AURORA-1959.
   14: SaveJobUpdate saveJobUpdate
   15: SaveJobUpdateEvent saveJobUpdateEvent
   16: SaveJobInstanceUpdateEvent saveJobInstanceUpdateEvent
   17: PruneJobUpdateHistory pruneJobUpdateHistory
+  18: RemoveJobUpdates removeJobUpdate
 }
 
 // The current schema version ID.  This should be incremented each time the
@@ -147,11 +148,10 @@ struct Snapshot {
   5: set<StoredCronJob> cronJobs
   6: SchedulerMetadata schedulerMetadata
   8: set<QuotaConfiguration> quotaConfigurations
-  9: set<api.Lock> locks
+  // 9: deleted
   10: set<StoredJobUpdateDetails> jobUpdateDetails
-  11: list<string> dbScript
-  // Indicates if experimental DB store for tasks and cron jobs was enabled when snapshot was cut.
-  12: bool experimentalTaskStore
+  //11: removed
+  //12: removed
 }
 
 // A message header that calls out the number of expected FrameChunks to follow to form a complete

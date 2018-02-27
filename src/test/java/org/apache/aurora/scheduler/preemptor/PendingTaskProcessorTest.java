@@ -14,10 +14,10 @@
 package org.apache.aurora.scheduler.preemptor;
 
 import java.util.Arrays;
+import java.util.Optional;
 
 import javax.annotation.Nullable;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.ImmutableSet;
@@ -34,11 +34,11 @@ import org.apache.aurora.gen.MaintenanceMode;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.gen.TaskEvent;
-import org.apache.aurora.scheduler.HostOffer;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.filter.AttributeAggregate;
+import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.stats.CachedCounters;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
@@ -47,7 +47,7 @@ import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
 import org.apache.aurora.scheduler.testing.FakeStatsProvider;
-import org.apache.mesos.Protos;
+import org.apache.mesos.v1.Protos;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -64,7 +64,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class PendingTaskProcessorTest extends EasyMockTest {
-  private static final String CACHE_STAT = "cache_size";
+  private static final String CACHE_NAME = "TEST";
+  private static final String CACHE_SIZE_STAT_NAME = "TEST_cache_size";
   private static final String SLAVE_ID_1 = "slave_id_1";
   private static final String SLAVE_ID_2 = "slave_id_2";
   private static final IJobKey JOB_A = JobKeys.from("role_a", "env", "job_a");
@@ -98,7 +99,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     clock = new FakeClock();
     slotCache = new BiCache<>(
         statsProvider,
-        new BiCache.BiCacheSettings(EXPIRATION, CACHE_STAT),
+        new BiCache.BiCacheSettings(EXPIRATION, CACHE_NAME),
         clock);
 
     slotFinder = new PendingTaskProcessor(
@@ -133,7 +134,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     assertEquals(2L, statsProvider.getLongValue(slotSearchStatName(true, true)));
     assertEquals(0L, statsProvider.getLongValue(slotSearchStatName(false, true)));
     assertEquals(0L, statsProvider.getLongValue(UNMATCHED_TASKS));
-    assertEquals(2L, statsProvider.getLongValue(CACHE_STAT));
+    assertEquals(2L, statsProvider.getLongValue(CACHE_SIZE_STAT_NAME));
   }
 
   @Test
@@ -212,7 +213,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     assertTrue(ImmutableSet.of(0L, 2L).contains(
         statsProvider.getLongValue(slotSearchStatName(false, true))));
     assertEquals(1L, statsProvider.getLongValue(UNMATCHED_TASKS));
-    assertEquals(2L, statsProvider.getLongValue(CACHE_STAT));
+    assertEquals(2L, statsProvider.getLongValue(CACHE_SIZE_STAT_NAME));
   }
 
   @Test
@@ -291,7 +292,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     Protos.Offer.Builder builder = Protos.Offer.newBuilder();
     builder.getIdBuilder().setValue("id");
     builder.getFrameworkIdBuilder().setValue("framework-id");
-    builder.getSlaveIdBuilder().setValue(slaveId);
+    builder.getAgentIdBuilder().setValue(slaveId);
     builder.setHostname(slaveId);
     return new HostOffer(
         builder.build(),
@@ -299,7 +300,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
   }
 
   private void expectOffers(HostOffer... offers) {
-    expect(offerManager.getOffers()).andReturn(ImmutableSet.copyOf(offers));
+    expect(offerManager.getAll()).andReturn(ImmutableSet.copyOf(offers));
   }
 
   private void expectGetClusterState(IScheduledTask... returnedTasks) {
@@ -315,7 +316,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
         eq(storageUtil.storeProvider)));
     expectLastCall().andReturn(
         victims.length == 0
-            ? Optional.absent()
+            ? Optional.empty()
             : Optional.of(ImmutableSet.copyOf(getVictims(victims).values())))
         .anyTimes();
   }

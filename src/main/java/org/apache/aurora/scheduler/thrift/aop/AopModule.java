@@ -13,14 +13,22 @@
  */
 package org.apache.aurora.scheduler.thrift.aop;
 
-import com.google.common.annotations.VisibleForTesting;
+import java.util.List;
+
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
+import com.google.common.collect.ImmutableList;
 import com.google.inject.AbstractModule;
 import com.google.inject.Binder;
+import com.google.inject.Module;
 import com.google.inject.matcher.Matcher;
 import com.google.inject.matcher.Matchers;
 
 import org.aopalliance.intercept.MethodInterceptor;
 import org.apache.aurora.gen.Response;
+import org.apache.aurora.scheduler.app.MoreModules;
+import org.apache.aurora.scheduler.config.CliOptions;
+import org.apache.aurora.scheduler.config.splitters.CommaSplitter;
 import org.apache.aurora.scheduler.thrift.auth.DecoratedThrift;
 
 /**
@@ -28,14 +36,30 @@ import org.apache.aurora.scheduler.thrift.auth.DecoratedThrift;
  */
 public class AopModule extends AbstractModule {
 
-  private static final Matcher<? super Class<?>> THRIFT_IFACE_MATCHER =
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-thrift_method_interceptor_modules",
+        description = "Custom Guice module(s) to provide additional Thrift method interceptors.",
+        splitter = CommaSplitter.class)
+
+    @SuppressWarnings("rawtypes")
+    public List<Class> methodInterceptorModules = ImmutableList.of();
+  }
+
+  public static final Matcher<? super Class<?>> THRIFT_IFACE_MATCHER =
       Matchers.subclassesOf(AnnotatedAuroraAdmin.class)
           .and(Matchers.annotatedWith(DecoratedThrift.class));
+
+  private final CliOptions options;
+
+  public AopModule(CliOptions options) {
+    this.options = options;
+  }
 
   @Override
   protected void configure() {
     // Layer ordering:
-    // APIVersion -> Log -> StatsExporter -> SchedulerThriftInterface
+    // APIVersion -> Log -> StatsExporter -> custom interceptors -> SchedulerThriftInterface
 
     // It's important for this interceptor to be registered first to ensure it's at the 'top' of
     // the stack and the standard message is always applied.
@@ -43,14 +67,20 @@ public class AopModule extends AbstractModule {
 
     bindThriftDecorator(new LoggingInterceptor());
     bindThriftDecorator(new ThriftStatsExporterInterceptor());
+
+    // Install custom interceptor modules
+    for (Module module
+        : MoreModules.instantiateAll(options.aop.methodInterceptorModules, options)) {
+
+      install(module);
+    }
   }
 
   private void bindThriftDecorator(MethodInterceptor interceptor) {
     bindThriftDecorator(binder(), THRIFT_IFACE_MATCHER, interceptor);
   }
 
-  @VisibleForTesting
-  static void bindThriftDecorator(
+  public static void bindThriftDecorator(
       Binder binder,
       Matcher<? super Class<?>> classMatcher,
       MethodInterceptor interceptor) {

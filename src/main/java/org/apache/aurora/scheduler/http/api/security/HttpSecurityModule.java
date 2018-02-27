@@ -14,12 +14,17 @@
 package org.apache.aurora.scheduler.http.api.security;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
 import javax.servlet.Filter;
+import javax.servlet.ServletContext;
 
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.AbstractModule;
 import com.google.inject.Key;
@@ -35,11 +40,12 @@ import com.google.inject.servlet.ServletModule;
 
 import org.aopalliance.intercept.MethodInterceptor;
 import org.apache.aurora.GuiceUtils;
-import org.apache.aurora.common.args.Arg;
-import org.apache.aurora.common.args.CmdLine;
 import org.apache.aurora.gen.AuroraAdmin;
 import org.apache.aurora.gen.AuroraSchedulerManager;
 import org.apache.aurora.scheduler.app.MoreModules;
+import org.apache.aurora.scheduler.config.CliOptions;
+import org.apache.aurora.scheduler.config.splitters.CommaSplitter;
+import org.apache.aurora.scheduler.http.api.security.HttpSecurityModule.Options.HttpAuthenticationMechanism;
 import org.apache.aurora.scheduler.thrift.aop.AnnotatedAuroraAdmin;
 import org.apache.shiro.SecurityUtils;
 import org.apache.shiro.guice.aop.ShiroAopModule;
@@ -50,8 +56,6 @@ import org.apache.shiro.subject.Subject;
 
 import static java.util.Objects.requireNonNull;
 
-import static org.apache.aurora.scheduler.http.H2ConsoleModule.H2_PATH;
-import static org.apache.aurora.scheduler.http.H2ConsoleModule.H2_PERM;
 import static org.apache.aurora.scheduler.http.api.ApiModule.API_PATH;
 import static org.apache.aurora.scheduler.spi.Permissions.Domain.THRIFT_AURORA_ADMIN;
 import static org.apache.shiro.guice.web.ShiroWebModule.guiceFilterModule;
@@ -64,24 +68,47 @@ import static org.apache.shiro.web.filter.authc.AuthenticatingFilter.PERMISSIVE;
  * included with this package.
  */
 public class HttpSecurityModule extends ServletModule {
-  public static final String HTTP_REALM_NAME = "Apache Aurora Scheduler";
+  private static final String HTTP_REALM_NAME = "Apache Aurora Scheduler";
 
-  private static final String H2_PATTERN = H2_PATH + "/**";
   private static final String ALL_PATTERN = "/**";
-  private static final Key<? extends Filter> K_STRICT =
-      Key.get(ShiroKerberosAuthenticationFilter.class);
   private static final Key<? extends Filter> K_PERMISSIVE =
       Key.get(ShiroKerberosPermissiveAuthenticationFilter.class);
 
-  @CmdLine(name = "shiro_realm_modules",
-      help = "Guice modules for configuring Shiro Realms.")
-  private static final Arg<Set<Module>> SHIRO_REALM_MODULE = Arg.create(
-      ImmutableSet.of(MoreModules.lazilyInstantiated(IniShiroRealmModule.class)));
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-shiro_realm_modules",
+        description = "Guice modules for configuring Shiro Realms.",
+        splitter = CommaSplitter.class)
+    @SuppressWarnings("rawtypes")
+    public List<Class> shiroRealmModule = ImmutableList.of(IniShiroRealmModule.class);
 
-  @CmdLine(name = "shiro_after_auth_filter",
-      help = "Fully qualified class name of the servlet filter to be applied after the"
-          + " shiro auth filters are applied.")
-  private static final Arg<Class<? extends Filter>> SHIRO_AFTER_AUTH_FILTER = Arg.create();
+    @Parameter(names = "-shiro_after_auth_filter",
+        description = "Fully qualified class name of the servlet filter to be applied after the"
+            + " shiro auth filters are applied.")
+    public Class<? extends Filter> shiroAfterAuthFilter;
+
+    public enum HttpAuthenticationMechanism {
+      /**
+       * No security.
+       */
+      NONE,
+
+      /**
+       * HTTP Basic Authentication, produces {@link org.apache.shiro.authc.UsernamePasswordToken}s.
+       */
+      BASIC,
+
+      /**
+       * Use GSS-Negotiate. Only Kerberos and SPNEGO-with-Kerberos GSS mechanisms are supported.
+       */
+      NEGOTIATE,
+    }
+
+    @Parameter(names = "-http_authentication_mechanism",
+        description = "HTTP Authentication mechanism to use.")
+    public HttpAuthenticationMechanism httpAuthenticationMechanism =
+        HttpAuthenticationMechanism.NONE;
+  }
 
   @VisibleForTesting
   static final Matcher<Method> AURORA_SCHEDULER_MANAGER_SERVICE =
@@ -91,56 +118,41 @@ public class HttpSecurityModule extends ServletModule {
   static final Matcher<Method> AURORA_ADMIN_SERVICE =
       GuiceUtils.interfaceMatcher(AuroraAdmin.Iface.class, true);
 
-  public enum HttpAuthenticationMechanism {
-    /**
-     * No security.
-     */
-    NONE,
-
-    /**
-     * HTTP Basic Authentication, produces {@link org.apache.shiro.authc.UsernamePasswordToken}s.
-     */
-    BASIC,
-
-    /**
-     * Use GSS-Negotiate. Only Kerberos and SPNEGO-with-Kerberos GSS mechanisms are supported.
-     */
-    NEGOTIATE,
-  }
-
-  @CmdLine(name = "http_authentication_mechanism", help = "HTTP Authentication mechanism to use.")
-  private static final Arg<HttpAuthenticationMechanism> HTTP_AUTHENTICATION_MECHANISM =
-      Arg.create(HttpAuthenticationMechanism.NONE);
-
   private final HttpAuthenticationMechanism mechanism;
   private final Set<Module> shiroConfigurationModules;
   private final Optional<Key<? extends Filter>> shiroAfterAuthFilterKey;
+  private final ServletContext servletContext;
 
-  public HttpSecurityModule() {
+  public HttpSecurityModule(CliOptions options, ServletContext servletContext) {
     this(
-        HTTP_AUTHENTICATION_MECHANISM.get(),
-        SHIRO_REALM_MODULE.get(),
-        SHIRO_AFTER_AUTH_FILTER.hasAppliedValue() ? Key.get(SHIRO_AFTER_AUTH_FILTER.get()) : null);
+        options.httpSecurity.httpAuthenticationMechanism,
+        MoreModules.instantiateAll(options.httpSecurity.shiroRealmModule, options),
+        Optional.ofNullable(options.httpSecurity.shiroAfterAuthFilter).map(Key::get).orElse(null),
+        servletContext);
   }
 
   @VisibleForTesting
   HttpSecurityModule(
       Module shiroConfigurationModule,
-      Key<? extends Filter> shiroAfterAuthFilterKey) {
+      Key<? extends Filter> shiroAfterAuthFilterKey,
+      ServletContext servletContext) {
 
     this(HttpAuthenticationMechanism.BASIC,
         ImmutableSet.of(shiroConfigurationModule),
-        shiroAfterAuthFilterKey);
+        shiroAfterAuthFilterKey,
+        servletContext);
   }
 
   private HttpSecurityModule(
       HttpAuthenticationMechanism mechanism,
       Set<Module> shiroConfigurationModules,
-      Key<? extends Filter> shiroAfterAuthFilterKey) {
+      Key<? extends Filter> shiroAfterAuthFilterKey,
+      ServletContext servletContext) {
 
     this.mechanism = requireNonNull(mechanism);
     this.shiroConfigurationModules = requireNonNull(shiroConfigurationModules);
     this.shiroAfterAuthFilterKey = Optional.ofNullable(shiroAfterAuthFilterKey);
+    this.servletContext = requireNonNull(servletContext);
   }
 
   @Override
@@ -168,9 +180,7 @@ public class HttpSecurityModule extends ServletModule {
       }
     });
     install(guiceFilterModule(API_PATH));
-    install(guiceFilterModule(H2_PATH));
-    install(guiceFilterModule(H2_PATH + "/*"));
-    install(new ShiroWebModule(getServletContext()) {
+    install(new ShiroWebModule(servletContext) {
 
       // Replace the ServletContainerSessionManager which causes subject.runAs(...) in a
       // downstream user-defined filter to fail. See also: SHIRO-554
@@ -192,13 +202,11 @@ public class HttpSecurityModule extends ServletModule {
         // more specific pattern first.
         switch (mechanism) {
           case BASIC:
-            addFilterChain(H2_PATTERN, NO_SESSION_CREATION, AUTHC_BASIC, config(PERMS, H2_PERM));
-            addFilterChainWithAfterAuthFilter(config(AUTHC_BASIC, PERMISSIVE));
+            addFilterChainWithAfterAuthFilter(filterConfig(AUTHC_BASIC, PERMISSIVE));
             break;
 
           case NEGOTIATE:
-            addFilterChain(H2_PATTERN, NO_SESSION_CREATION, K_STRICT, config(PERMS, H2_PERM));
-            addFilterChainWithAfterAuthFilter(K_PERMISSIVE);
+            addFilterChainWithAfterAuthFilter(filterConfig(K_PERMISSIVE));
             break;
 
           default:
@@ -207,22 +215,31 @@ public class HttpSecurityModule extends ServletModule {
         }
       }
 
-      private void addFilterChainWithAfterAuthFilter(Key<? extends Filter> filter) {
+      private void addFilterChainWithAfterAuthFilter(FilterConfig<? extends Filter> filter) {
         if (shiroAfterAuthFilterKey.isPresent()) {
-          addFilterChain(filter, shiroAfterAuthFilterKey.get());
+          addFilterChain(filter, filterConfig(shiroAfterAuthFilterKey.get()));
         } else {
           addFilterChain(filter);
         }
       }
 
       @SuppressWarnings("unchecked")
-      private void addFilterChain(Key<? extends Filter> filter) {
-        addFilterChain(ALL_PATTERN, NO_SESSION_CREATION, filter);
+      private void addFilterChain(FilterConfig<? extends Filter> filter) {
+        addFilterChain(
+            ALL_PATTERN,
+            filterConfig(NO_SESSION_CREATION),
+            filter);
       }
 
       @SuppressWarnings("unchecked")
-      private void addFilterChain(Key<? extends Filter> filter1, Key<? extends Filter> filter2) {
-        addFilterChain(ALL_PATTERN, NO_SESSION_CREATION, filter1, filter2);
+      private void addFilterChain(
+          FilterConfig<? extends Filter> filter1,
+          FilterConfig<? extends Filter> filter2) {
+        addFilterChain(
+            ALL_PATTERN,
+            filterConfig(NO_SESSION_CREATION),
+            filter1,
+            filter2);
       }
     });
 

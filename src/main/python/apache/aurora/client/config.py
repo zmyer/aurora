@@ -19,7 +19,6 @@ from __future__ import print_function
 
 import functools
 import math
-import re
 import sys
 
 from pystachio import Empty
@@ -42,33 +41,18 @@ def _validate_announce_configuration(config):
     return
 
   primary_port = config.raw().announce().primary_port().get()
-  if primary_port not in config.ports():
+  portmap = config.raw().announce().portmap().get()
+
+  if primary_port not in config.ports() and primary_port not in portmap:
     print(ANNOUNCE_WARNING % {'primary_port': primary_port}, file=sys.stderr)
 
-  if config.raw().has_announce() and not config.raw().has_constraints() or (
-      'dedicated' not in config.raw().constraints()):
-    for port in config.raw().announce().portmap().get().values():
+  if not (config.raw().has_constraints() and 'dedicated' in config.raw().constraints()):
+    for port in portmap.values():
       try:
         port = int(port)
       except ValueError:
         continue
       raise ValueError('Job must be dedicated in order to specify static ports!')
-
-
-STAGING_RE = re.compile(r'^staging\d*$')
-
-
-def __validate_env(name, config_name):
-  if STAGING_RE.match(name):
-    return
-  if name not in ('prod', 'devel', 'test'):
-    raise ValueError('%s should be one of "prod", "devel", "test" or '
-                     'staging<number>!  Got %s' % (config_name, name))
-
-
-def _validate_environment_name(config):
-  env_name = str(config.raw().environment())
-  __validate_env(env_name, 'Environment')
 
 
 UPDATE_CONFIG_MAX_FAILURES_ERROR = '''
@@ -146,7 +130,6 @@ def _validate_deprecated_config(config):
 def validate_config(config, env=None):
   _validate_update_config(config)
   _validate_announce_configuration(config)
-  _validate_environment_name(config)
   _validate_deprecated_config(config)
 
 

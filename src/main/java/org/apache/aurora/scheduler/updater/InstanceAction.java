@@ -13,20 +13,21 @@
  */
 package org.apache.aurora.scheduler.updater;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
 
 import static org.apache.aurora.scheduler.updater.InstanceActionHandler.AddTask;
 import static org.apache.aurora.scheduler.updater.InstanceActionHandler.KillTask;
 import static org.apache.aurora.scheduler.updater.InstanceActionHandler.WatchRunningTask;
 
 enum InstanceAction {
-  KILL_TASK(Optional.of(new KillTask())),
+  KILL_TASK_AND_RESERVE(Optional.of(new KillTask(true))),
+  KILL_TASK(Optional.of(new KillTask(false))),
   // TODO(wfarner): Build this action into the scheduler state machine instead.  Rather than
   // killing a task and re-recreating it, choose the updated or rolled-back task when we are
   // deciding to reschedule the task.
   ADD_TASK(Optional.of(new AddTask())),
   WATCH_TASK(Optional.of(new WatchRunningTask())),
-  AWAIT_STATE_CHANGE(Optional.absent());
+  AWAIT_STATE_CHANGE(Optional.empty());
 
   private final Optional<InstanceActionHandler> handler;
 

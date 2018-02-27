@@ -1,3 +1,67 @@
+Aurora 0.19.0
+--------------------------------------------------------------------------------
+## Bug
+    * [AURORA-1953] - Scheduler livelock during startup
+    * [AURORA-1944] - Aurora is unable to elect leader after losing ZK for an extended period of time
+    * [AURORA-1950] - Exceptions in LogStorage.prepare() cause scheduler die and stay in DEAD state
+    * [AURORA-1955] - thermos should exit on irrecoverable errors to avoid zombies
+    * [AURORA-1943] - PreemptionVictimFilter does not handle varied ResourceTypes
+    * [AURORA-1939] - Thermos landing (host) page reports incorrect CPU rates when it is busy
+    * [AURORA-1945] - Rescinds received but not processed in time before offer accept
+
+## Story
+    * [AURORA-319] - Allow job environments other than prod, devel, test or staging<number>
+    * [AURORA-1947] - Improve in-process ZooKeeper support for local development
+
+## Sub-task
+    * [AURORA-1773] - Asynchronously call webhook endpoint not to block EventBus
+
+## Task
+    * [AURORA-1951] - UI build broken in gradle 4.2
+    * [AURORA-1937] - Add metrics for status updates before switching to V1 Mesos Driver implementaion
+    * [AURORA-1940] - aurora job restart request should be retryable
+    * [AURORA-1934] - Add a whitelist for TaskStateChange events in Aurora Scheduler WebHooks
+    * [AURORA-1931] - Configurable wait period for graceful shutdown
+    * [AURORA-1669] - Kill twitter/commons ZK libs when Curator replacements are vetted
+    * [AURORA-1897] - Remove task length restrictions.
+
+
+Aurora 0.18.0
+--------------------------------------------------------------------------------
+## Bug
+    * [AURORA-1913] - Aurora Client Job Update Diff output is erroneous
+    * [AURORA-1850] - Raw StatusResult passed to the scheduler when tasks are healthy
+    * [AURORA-1911] - HTTP Scheduler Driver does not reliably re subscribe
+    * [AURORA-1912] - DbSnapShot may remove enum values
+    * [AURORA-1933] - Scheduler can process rescind before offer
+    * [AURORA-1909] - Thermos Health Check fails for MesosContainerizer if `--nosetuid-health-checks` is set
+    * [AURORA-1914] - Unable to specify multiple volumes per task.
+    * [AURORA-1910] - framework_registered metric isn't reset when scheduler disconnects
+
+## Epic
+    * [AURORA-1920] - Add pluggable scheduling logic to Aurora
+    * [AURORA-1680] - Aurora 0.16.0 deprecations
+
+## Story
+    * [AURORA-1923] - Aurora client should not automatically retry non-idempotent operations
+    * [AURORA-1922] - Expose stats on the number of jobs stored in MemCronJobStore
+    * [AURORA-1907] - Thermos unresponsive on hosts with many active task
+    * [AURORA-1915] - Add automatic browser tab open feature for aurora update start
+
+## Task
+    * [AURORA-1882] - Add support for Mesos ContainerLaunchInfo
+    * [AURORA-1870] - Add finer grained timings to the Snapshot process
+    * [AURORA-1904] - Support Mesos Maintenance
+    * [AURORA-1905] - Set "webui_url" field of FrameworkInfo
+    * [AURORA-1929] - Improve explicit task history pruning.
+    * [AURORA-1925] - Easily copy files to/from an aurora task instance
+    * [AURORA-1928] - Aurora should prioritize adding instances over updating instances during an update
+    * [AURORA-1860] - Fix bug in scheduler driver disconnect stats
+    * [AURORA-1888] - Create Driver implementation around V1Mesos
+    * [AURORA-1887] - Create Driver implementation around V0Mesos.
+    * [AURORA-1921] - Create proposal for which components should be pluggable
+
+
 Aurora 0.17.0
 --------------------------------------------------------------------------------
 ## Bug

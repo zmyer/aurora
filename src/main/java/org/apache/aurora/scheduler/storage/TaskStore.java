@@ -13,11 +13,12 @@
  */
 package org.apache.aurora.scheduler.storage;
 
+import java.util.Collection;
+import java.util.Optional;
 import java.util.Set;
 
 import com.google.common.base.CharMatcher;
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Predicate;
 
 import org.apache.aurora.scheduler.base.Query;
@@ -47,7 +48,7 @@ public interface TaskStore {
    * @param query Builder of the query to identify tasks with.
    * @return A read-only view of matching tasks.
    */
-  Iterable<IScheduledTask> fetchTasks(Query.Builder query);
+  Collection<IScheduledTask> fetchTasks(Query.Builder query);
 
   /**
    * Fetches all job keys represented in the task store.
@@ -98,22 +99,6 @@ public interface TaskStore {
     Optional<IScheduledTask> mutateTask(
         String taskId,
         Function<IScheduledTask, IScheduledTask> mutator);
-
-    /**
-     * Rewrites a task's configuration in-place.
-     * <p>
-     * <b>WARNING</b>: this is a dangerous operation, and should not be used without exercising
-     * great care.  This feature should be used as a last-ditch effort to rewrite things that
-     * the scheduler otherwise can't (e.g. {@link ITaskConfig#executorConfig}) rewrite in a
-     * controlled/tested backfill operation.
-     *
-     * @param taskId ID of the task to alter.
-     * @param taskConfiguration Configuration object to swap with the existing task's
-     *                          configuration.
-     * @return {@code true} if the modification took effect, or {@code false} if the task does not
-     *         exist in the store.
-     */
-    boolean unsafeModifyInPlace(String taskId, ITaskConfig taskConfiguration);
   }
 
   final class Util {

@@ -15,7 +15,7 @@ import unittest
 
 from apache.aurora.config.resource import ResourceDetails, ResourceManager, ResourceType
 
-from gen.apache.aurora.api.ttypes import Resource, ResourceAggregate, TaskConfig
+from gen.apache.aurora.api.ttypes import Resource, ResourceAggregate
 
 
 class TestResourceType(unittest.TestCase):
@@ -24,17 +24,22 @@ class TestResourceType(unittest.TestCase):
     assert ResourceType.from_resource(Resource(ramMb=1)) is ResourceType.RAM_MB
     assert ResourceType.from_resource(Resource(diskMb=0)) is ResourceType.DISK_MB
     assert ResourceType.from_resource(Resource(namedPort='http')) is ResourceType.PORTS
+    assert ResourceType.from_resource(Resource(numGpus=1)) is ResourceType.GPUS
 
   def test_resource_value(self):
     assert ResourceType.CPUS.resource_value(Resource(numCpus=1.0)) == 1.0
+    assert ResourceType.GPUS.resource_value(Resource(numGpus=1)) == 1
 
 
 class TestResourceManager(unittest.TestCase):
   def test_resource_details(self):
-    details = ResourceManager.resource_details([Resource(ramMb=2), Resource(numCpus=1.0)])
-    assert len(details) == 2
-    assert details[0] == ResourceDetails(ResourceType.CPUS, 1.0)
+    details = ResourceManager.resource_details([
+        Resource(ramMb=2), Resource(numCpus=1.0), Resource(numGpus=1.0)
+    ])
+    assert len(details) == 3
     assert details[1] == ResourceDetails(ResourceType.RAM_MB, 2)
+    assert details[0] == ResourceDetails(ResourceType.CPUS, 1.0)
+    assert details[2] == ResourceDetails(ResourceType.GPUS, 1)
 
   def test_quantity_of(self):
     quantity = ResourceManager.quantity_of(
@@ -48,13 +53,4 @@ class TestResourceManager(unittest.TestCase):
         ResourceDetails(ResourceType.CPUS, 1.0),
         ResourceDetails(ResourceType.RAM_MB, 2),
         ResourceDetails(ResourceType.DISK_MB, 3)
-    ]
-
-  def test_backfill_task(self):
-    task = TaskConfig(numCpus=1.0, ramMb=2, diskMb=3, requestedPorts=frozenset(['http']))
-    assert ResourceManager.resource_details_from_quota(task) == [
-        ResourceDetails(ResourceType.CPUS, 1.0),
-        ResourceDetails(ResourceType.RAM_MB, 2),
-        ResourceDetails(ResourceType.DISK_MB, 3),
-        ResourceDetails(ResourceType.PORTS, 'http'),
     ]

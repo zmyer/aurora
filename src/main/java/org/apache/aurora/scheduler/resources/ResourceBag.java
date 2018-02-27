@@ -108,7 +108,7 @@ public class ResourceBag {
    * @param type Resource type to get value for.
    * @return Resource value or 0.0 if no mapping for {@code type} is found.
    */
-  public Double valueOf(ResourceType type) {
+  public double valueOf(ResourceType type) {
     return resourceVectors.getOrDefault(type, 0.0);
   }
 
@@ -175,6 +175,17 @@ public class ResourceBag {
     return new ResourceBag(resourceVectors.entrySet().stream()
         .filter(predicate)
         .collect(toMap(Map.Entry::getKey, Map.Entry::getValue)));
+  }
+
+  /**
+   * Verifies whether another bag would be able to fit into this one.
+   *
+   * @param other Other bag to try and fit.
+   * @return Whether or not the bag fits.
+   */
+  public boolean greaterThanOrEqualTo(ResourceBag other) {
+    // Subtract the subject and check if any of the resources have a negative value.
+    return subtract(other).filter(IS_NEGATIVE).getResourceVectors().isEmpty();
   }
 
   /**

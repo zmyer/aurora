@@ -17,18 +17,18 @@ package org.apache.aurora.scheduler.configuration.executor;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.CharStreams;
 import com.hubspot.jackson.datatype.protobuf.ProtobufModule;
 
 import org.apache.aurora.GuavaUtils;
-import org.apache.mesos.Protos.ExecutorID;
-import org.apache.mesos.Protos.ExecutorInfo;
-import org.apache.mesos.Protos.Volume;
+import org.apache.mesos.v1.Protos.ExecutorID;
+import org.apache.mesos.v1.Protos.ExecutorInfo;
+import org.apache.mesos.v1.Protos.Volume;
 
 import static com.fasterxml.jackson.databind.PropertyNamingStrategy.CAMEL_CASE_TO_LOWER_CASE_WITH_UNDERSCORES;
 
@@ -88,7 +88,7 @@ public final class ExecutorSettingsLoader {
               m -> m.executor.getName(),
               m -> new ExecutorConfig(
                   m.executor.setExecutorId(PLACEHOLDER_EXECUTOR_ID).build(),
-                  Optional.fromNullable(m.volumeMounts).or(ImmutableList.of()),
+                  Optional.ofNullable(m.volumeMounts).orElse(ImmutableList.of()),
                   m.taskPrefix)));
 
     } catch (RuntimeException e) {

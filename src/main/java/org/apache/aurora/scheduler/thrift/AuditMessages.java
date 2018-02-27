@@ -46,15 +46,16 @@ class AuditMessages {
         .orElse(DEFAULT_USER);
   }
 
-  com.google.common.base.Optional<String> transitionedBy() {
-    return com.google.common.base.Optional.of("Transition forced by " + getRemoteUserName());
+  Optional<String> transitionedBy() {
+    return Optional.of("Transition forced by " + getRemoteUserName());
   }
 
-  com.google.common.base.Optional<String> killedByRemoteUser() {
-    return com.google.common.base.Optional.of("Killed by " + getRemoteUserName());
+  Optional<String> killedByRemoteUser(Optional<String> message) {
+    String suffix = message.map(s -> ".\n" + s).orElse("");
+    return Optional.of("Killed by " + getRemoteUserName() + suffix);
   }
 
-  com.google.common.base.Optional<String> restartedByRemoteUser() {
-    return com.google.common.base.Optional.of("Restarted by " + getRemoteUserName());
+  Optional<String> restartedByRemoteUser() {
+    return Optional.of("Restarted by " + getRemoteUserName());
   }
 }

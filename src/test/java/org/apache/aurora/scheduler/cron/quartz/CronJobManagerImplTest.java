@@ -15,9 +15,9 @@ package org.apache.aurora.scheduler.cron.quartz;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TimeZone;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -31,9 +31,9 @@ import org.apache.aurora.scheduler.cron.CrontabEntry;
 import org.apache.aurora.scheduler.cron.SanitizedCronJob;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.easymock.EasyMock;
 import org.junit.Before;
 import org.junit.Test;
@@ -59,7 +59,7 @@ public class CronJobManagerImplTest extends EasyMockTest {
 
   @Before
   public void setUp() {
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     scheduler = createMock(Scheduler.class);
 
     cronJobManager = new CronJobManagerImpl(storage, scheduler, TimeZone.getTimeZone("GMT"));
@@ -106,7 +106,9 @@ public class CronJobManagerImplTest extends EasyMockTest {
     control.replay();
 
     cronJobManager.updateJob(sanitizedCronJob);
-    assertEquals(sanitizedCronJob.getSanitizedConfig().getJobConfig(), fetchFromStorage().orNull());
+    assertEquals(
+        sanitizedCronJob.getSanitizedConfig().getJobConfig(),
+        fetchFromStorage().orElse(null));
   }
 
   @Test
@@ -120,7 +122,7 @@ public class CronJobManagerImplTest extends EasyMockTest {
       // Expected.
     }
 
-    assertEquals(Optional.absent(), fetchFromStorage());
+    assertEquals(Optional.empty(), fetchFromStorage());
   }
 
   @Test
@@ -136,7 +138,7 @@ public class CronJobManagerImplTest extends EasyMockTest {
 
     assertEquals(
         sanitizedCronJob.getSanitizedConfig().getJobConfig(),
-        fetchFromStorage().orNull());
+        fetchFromStorage().orElse(null));
   }
 
   @Test(expected = CronException.class)
@@ -182,7 +184,7 @@ public class CronJobManagerImplTest extends EasyMockTest {
       // Expected.
     }
 
-    assertEquals(Optional.absent(), fetchFromStorage());
+    assertEquals(Optional.empty(), fetchFromStorage());
   }
 
   @Test
@@ -194,7 +196,7 @@ public class CronJobManagerImplTest extends EasyMockTest {
     assertFalse(cronJobManager.deleteJob(QuartzTestUtil.AURORA_JOB_KEY));
     populateStorage();
     assertTrue(cronJobManager.deleteJob(QuartzTestUtil.AURORA_JOB_KEY));
-    assertEquals(Optional.absent(), fetchFromStorage());
+    assertEquals(Optional.empty(), fetchFromStorage());
   }
 
   @Test

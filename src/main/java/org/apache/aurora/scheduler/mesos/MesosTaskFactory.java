@@ -15,19 +15,18 @@ package org.apache.aurora.scheduler.mesos;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.protobuf.ByteString;
 
 import org.apache.aurora.Protobufs;
 import org.apache.aurora.codec.ThriftBinaryCodec;
-import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.SchedulerException;
 import org.apache.aurora.scheduler.base.Tasks;
@@ -44,19 +43,19 @@ import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IMesosContainer;
 import org.apache.aurora.scheduler.storage.entities.IServerInfo;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.mesos.Protos;
-import org.apache.mesos.Protos.CommandInfo;
-import org.apache.mesos.Protos.ContainerInfo;
-import org.apache.mesos.Protos.DiscoveryInfo;
-import org.apache.mesos.Protos.ExecutorID;
-import org.apache.mesos.Protos.ExecutorInfo;
-import org.apache.mesos.Protos.Label;
-import org.apache.mesos.Protos.Labels;
-import org.apache.mesos.Protos.Offer;
-import org.apache.mesos.Protos.Port;
-import org.apache.mesos.Protos.Resource;
-import org.apache.mesos.Protos.TaskID;
-import org.apache.mesos.Protos.TaskInfo;
+import org.apache.mesos.v1.Protos;
+import org.apache.mesos.v1.Protos.CommandInfo;
+import org.apache.mesos.v1.Protos.ContainerInfo;
+import org.apache.mesos.v1.Protos.DiscoveryInfo;
+import org.apache.mesos.v1.Protos.ExecutorID;
+import org.apache.mesos.v1.Protos.ExecutorInfo;
+import org.apache.mesos.v1.Protos.Label;
+import org.apache.mesos.v1.Protos.Labels;
+import org.apache.mesos.v1.Protos.Offer;
+import org.apache.mesos.v1.Protos.Port;
+import org.apache.mesos.v1.Protos.Resource;
+import org.apache.mesos.v1.Protos.TaskID;
+import org.apache.mesos.v1.Protos.TaskInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,7 +76,7 @@ public interface MesosTaskFactory {
    * @return A new task.
    * @throws SchedulerException If the task could not be encoded.
    */
-  TaskInfo createFrom(IAssignedTask task, Offer offer) throws SchedulerException;
+  TaskInfo createFrom(IAssignedTask task, Offer offer, boolean revocable) throws SchedulerException;
 
   // TODO(wfarner): Move this class to its own file to reduce visibility to package private.
   class MesosTaskFactoryImpl implements MesosTaskFactory {
@@ -100,17 +99,11 @@ public interface MesosTaskFactory {
     static final String TIER_LABEL = AURORA_LABEL_PREFIX + ".tier";
 
     private final ExecutorSettings executorSettings;
-    private final TierManager tierManager;
     private final IServerInfo serverInfo;
 
     @Inject
-    MesosTaskFactoryImpl(
-        ExecutorSettings executorSettings,
-        TierManager tierManager,
-        IServerInfo serverInfo) {
-
+    MesosTaskFactoryImpl(ExecutorSettings executorSettings, IServerInfo serverInfo) {
       this.executorSettings = requireNonNull(executorSettings);
-      this.tierManager = requireNonNull(tierManager);
       this.serverInfo = requireNonNull(serverInfo);
     }
 
@@ -151,18 +144,15 @@ public interface MesosTaskFactory {
     }
 
     @Override
-    public TaskInfo createFrom(IAssignedTask task, Offer offer) throws SchedulerException {
+    public TaskInfo createFrom(IAssignedTask task, Offer offer, boolean revocable)
+        throws SchedulerException {
+
       requireNonNull(task);
       requireNonNull(offer);
 
       ITaskConfig config = task.getTask();
 
-      // Docker-based tasks don't need executors
-      ResourceBag executorOverhead = ResourceBag.EMPTY;
-      if (config.isSetExecutorConfig()) {
-        executorOverhead =
-            executorSettings.getExecutorOverhead(getExecutorName(task)).orElse(ResourceBag.EMPTY);
-      }
+      ResourceBag executorOverhead = executorSettings.getExecutorOverhead(config);
 
       AcceptedOffer acceptedOffer;
       // TODO(wfarner): Re-evaluate if/why we need to continue handling unset assignedPorts field.
@@ -171,20 +161,22 @@ public interface MesosTaskFactory {
             offer,
             task,
             executorOverhead,
-            tierManager.getTier(task.getTask()));
+            revocable);
       } catch (ResourceManager.InsufficientResourcesException e) {
         throw new SchedulerException(e);
       }
       Iterable<Resource> resources = acceptedOffer.getTaskResources();
 
-      LOG.debug(
-          "Setting task resources to {}",
-          Iterables.transform(resources, Protobufs::toString));
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(
+            "Setting task resources to {}",
+            Iterables.transform(resources, Protobufs::toString));
+      }
 
       TaskInfo.Builder taskBuilder = TaskInfo.newBuilder()
           .setName(JobKeys.canonicalString(Tasks.getJob(task)))
           .setTaskId(TaskID.newBuilder().setValue(task.getTaskId()))
-          .setSlaveId(offer.getSlaveId())
+          .setAgentId(offer.getAgentId())
           .addAllResources(resources);
 
       configureTaskLabels(config, taskBuilder);
@@ -214,7 +206,7 @@ public interface MesosTaskFactory {
           taskBuilder.setExecutor(execBuilder.build());
         } else {
           LOG.warn("Running Docker-based task without an executor.");
-          taskBuilder.setContainer(getDockerContainerInfo(dockerContainer, Optional.absent()))
+          taskBuilder.setContainer(getDockerContainerInfo(dockerContainer, Optional.empty()))
               .setCommand(CommandInfo.newBuilder().setShell(false));
         }
       } else {
@@ -279,7 +271,7 @@ public interface MesosTaskFactory {
             .addVolumes(volume));
       }
 
-      return Optional.absent();
+      return Optional.empty();
     }
 
     private ContainerInfo getDockerContainerInfo(
@@ -334,9 +326,11 @@ public interface MesosTaskFactory {
       builder.setCommand(builder.getCommand().toBuilder().addAllUris(mesosFetcherUris));
 
       Iterable<Resource> executorResources = acceptedOffer.getExecutorResources();
-      LOG.debug(
-          "Setting executor resources to {}",
-          Iterables.transform(executorResources, Protobufs::toString));
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(
+            "Setting executor resources to {}",
+            Iterables.transform(executorResources, Protobufs::toString));
+      }
       builder.clearResources().addAllResources(executorResources);
       return builder;
     }

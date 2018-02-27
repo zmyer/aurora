@@ -32,6 +32,7 @@ from gen.apache.aurora.api.ttypes import (
     GetTierConfigResult,
     JobKey,
     JobUpdateSummary,
+    Resource,
     Response,
     ResponseCode,
     ResponseDetail,
@@ -224,12 +225,13 @@ class AuroraClientCommandTest(unittest.TestCase):
   def create_task_config(cls, name):
     return TaskConfig(
         maxTaskFailures=1,
-        executorConfig=ExecutorConfig(data='fake data'),
+        executorConfig=ExecutorConfig(data='{"fake": "data"}'),
         metadata=[],
         job=JobKey(role=cls.TEST_ROLE, environment=cls.TEST_ENV, name=name),
-        numCpus=2,
-        ramMb=2,
-        diskMb=2)
+        resources=frozenset(
+            [Resource(numCpus=2),
+             Resource(ramMb=2),
+             Resource(diskMb=2)]))
 
   @classmethod
   def create_scheduled_tasks(cls):
@@ -396,7 +398,8 @@ jobs = [HELLO_WORLD]
 
   @classmethod
   def assert_lock_message(cls, context):
-    assert [line for line in context.get_err() if line == "\t%s" % context.LOCK_ERROR_MSG]
+    assert [line for line in context.get_err() if line == "\t%s" %
+        context.JOB_UPDATING_ERROR_MSG]
 
   PREFERRED_TIER = TierConfig(
     name='preferred',

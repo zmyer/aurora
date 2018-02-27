@@ -13,6 +13,9 @@
  */
 package org.apache.aurora.scheduler.pruning;
 
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -28,12 +31,11 @@ import org.apache.aurora.common.util.testing.FakeClock;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
 import org.apache.aurora.scheduler.SchedulerModule.TaskEventBatchWorker;
-import org.apache.aurora.scheduler.async.DelayExecutor;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
 import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.events.PubsubEvent.TaskStateChange;
-import org.apache.aurora.scheduler.pruning.TaskHistoryPruner.HistoryPrunnerSettings;
+import org.apache.aurora.scheduler.pruning.TaskHistoryPruner.HistoryPrunerSettings;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
@@ -53,6 +55,7 @@ import static org.apache.aurora.gen.ScheduleStatus.STARTING;
 import static org.apache.aurora.scheduler.pruning.TaskHistoryPruner.TASKS_PRUNED;
 import static org.apache.aurora.scheduler.testing.BatchWorkerUtil.expectBatchExecute;
 import static org.easymock.EasyMock.eq;
+import static org.easymock.EasyMock.expect;
 import static org.easymock.EasyMock.expectLastCall;
 import static org.junit.Assert.assertEquals;
 
@@ -64,7 +67,7 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
   private static final Amount<Long, Time> ONE_HOUR = Amount.of(1L, Time.HOURS);
   private static final int PER_JOB_HISTORY = 2;
 
-  private DelayExecutor executor;
+  private ScheduledExecutorService executor;
   private FakeClock clock;
   private StateManager stateManager;
   private StorageTestUtil storageUtil;
@@ -75,7 +78,7 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
 
   @Before
   public void setUp() throws Exception {
-    executor = createMock(DelayExecutor.class);
+    executor = createMock(ScheduledExecutorService.class);
     clock = new FakeClock();
     stateManager = createMock(StateManager.class);
     storageUtil = new StorageTestUtil(this);
@@ -89,7 +92,7 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
         executor,
         stateManager,
         clock,
-        new HistoryPrunnerSettings(ONE_DAY, ONE_MINUTE, PER_JOB_HISTORY),
+        new HistoryPrunerSettings(ONE_DAY, ONE_MINUTE, PER_JOB_HISTORY),
         storageUtil.storage,
         new Lifecycle(shutdownCommand),
         batchWorker,
@@ -310,9 +313,11 @@ public class TaskHistoryPrunerTest extends EasyMockTest {
 
   private Capture<Runnable> expectDelayedPrune(long timestampMillis) {
     Capture<Runnable> capture = createCapture();
-    executor.execute(
+    expect(executor.schedule(
         EasyMock.capture(capture),
-        eq(Amount.of(pruner.calculateTimeout(timestampMillis), Time.MILLISECONDS)));
+        eq(pruner.calculateTimeout(timestampMillis)),
+        eq(TimeUnit.MILLISECONDS)))
+        .andReturn(null);
     return capture;
   }
 

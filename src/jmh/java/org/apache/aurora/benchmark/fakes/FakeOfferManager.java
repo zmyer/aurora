@@ -13,22 +13,30 @@
  */
 package org.apache.aurora.benchmark.fakes;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
 
-import org.apache.aurora.scheduler.HostOffer;
+import com.google.common.collect.ImmutableList;
+
 import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.events.PubsubEvent;
+import org.apache.aurora.scheduler.filter.SchedulingFilter.ResourceRequest;
+import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
-import org.apache.mesos.Protos;
+import org.apache.mesos.v1.Protos;
 
 public class FakeOfferManager implements OfferManager {
   @Override
-  public void addOffer(HostOffer offer) {
+  public void add(HostOffer offer) {
     // no-op
   }
 
   @Override
-  public void cancelOffer(Protos.OfferID offerId) {
+  public boolean cancel(Protos.OfferID offerId) {
+    return false;
+  }
+
+  @Override
+  public void ban(Protos.OfferID offerId) {
     // no-op
   }
 
@@ -38,27 +46,29 @@ public class FakeOfferManager implements OfferManager {
   }
 
   @Override
-  public void banOffer(Protos.OfferID offerId, TaskGroupKey groupKey) {
-    // no-op
-  }
-
-  @Override
-  public Iterable<HostOffer> getOffers(TaskGroupKey groupKey) {
-    return null;
-  }
-
-  @Override
   public void hostAttributesChanged(PubsubEvent.HostAttributesChanged change) {
     // no-op
   }
 
   @Override
-  public Iterable<HostOffer> getOffers() {
+  public Optional<HostOffer> get(Protos.AgentID agentId) {
+    return Optional.empty();
+  }
+
+  @Override
+  public Iterable<HostOffer> getAll() {
     return null;
   }
 
   @Override
-  public Optional<HostOffer> getOffer(Protos.SlaveID slaveId) {
-    return Optional.absent();
+  public Optional<HostOffer> getMatching(Protos.AgentID slaveId, ResourceRequest resourceRequest) {
+    return Optional.empty();
+  }
+
+  @Override
+  public Iterable<HostOffer> getAllMatching(TaskGroupKey groupKey,
+                                            ResourceRequest resourceRequest) {
+
+    return ImmutableList.of();
   }
 }

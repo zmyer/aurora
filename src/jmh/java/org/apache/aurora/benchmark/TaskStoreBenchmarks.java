@@ -16,7 +16,6 @@ package org.apache.aurora.benchmark;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Optional;
 import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
 import com.google.inject.util.Modules;
@@ -27,10 +26,9 @@ import org.apache.aurora.common.util.testing.FakeClock;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.TaskStore;
-import org.apache.aurora.scheduler.storage.db.DbModule;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
+import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
-import org.apache.aurora.scheduler.storage.mem.InMemStoresModule;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.apache.aurora.scheduler.testing.FakeStatsProvider;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -46,8 +44,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 
-import static org.apache.aurora.common.inject.Bindings.KeyFactory.PLAIN;
-
 public class TaskStoreBenchmarks {
 
   @BenchmarkMode(Mode.Throughput)
@@ -58,6 +54,7 @@ public class TaskStoreBenchmarks {
   @State(Scope.Thread)
   public abstract static class AbstractFetchTasksBenchmark {
     protected Storage storage;
+    protected IJobKey job;
     public abstract void setUp();
 
     @Param({"10000", "50000", "100000"})
@@ -67,6 +64,7 @@ public class TaskStoreBenchmarks {
       storage.write((Storage.MutateWork.NoResult.Quiet) storeProvider -> {
         TaskStore.Mutable taskStore = storeProvider.getUnsafeTaskStore();
         Set<IScheduledTask> tasks = new Tasks.Builder().build(size);
+        job = tasks.stream().findFirst().get().getAssignedTask().getTask().getJob();
         taskStore.saveTasks(tasks);
       });
     }
@@ -79,13 +77,13 @@ public class TaskStoreBenchmarks {
     }
   }
 
-  public static class MemFetchTasksBenchmark extends AbstractFetchTasksBenchmark {
+  public static class FetchAll extends AbstractFetchTasksBenchmark {
     @Setup(Level.Trial)
     @Override
     public void setUp() {
       storage = Guice.createInjector(
           Modules.combine(
-              DbModule.testModuleWithWorkQueue(PLAIN, Optional.of(new InMemStoresModule(PLAIN))),
+              new MemStorageModule(),
               new AbstractModule() {
                 @Override
                 protected void configure() {
@@ -108,16 +106,27 @@ public class TaskStoreBenchmarks {
     }
 
     @Benchmark
-    public Iterable<IScheduledTask> run() {
-      return storage.read(store -> store.getTaskStore().fetchTasks(Query.unscoped()));
+    public int run() {
+      return storage.read(store -> store.getTaskStore().fetchTasks(Query.unscoped())).size();
     }
   }
 
-  public static class DBFetchTasksBenchmark extends AbstractFetchTasksBenchmark {
+  public static class IndexedFetchAndFilter extends AbstractFetchTasksBenchmark {
     @Setup(Level.Trial)
     @Override
     public void setUp() {
-      storage = DbUtil.createStorage();
+      storage = Guice.createInjector(
+          Modules.combine(
+              new MemStorageModule(),
+              new AbstractModule() {
+                @Override
+                protected void configure() {
+                  bind(StatsProvider.class).toInstance(new FakeStatsProvider());
+                  bind(Clock.class).toInstance(new FakeClock());
+                }
+              }))
+          .getInstance(Storage.class);
+
     }
 
     @Setup(Level.Iteration)
@@ -131,8 +140,9 @@ public class TaskStoreBenchmarks {
     }
 
     @Benchmark
-    public Iterable<IScheduledTask> run() {
-      return storage.read(store -> store.getTaskStore().fetchTasks(Query.unscoped()));
+    public int run() {
+      return storage.read(
+          store -> store.getTaskStore().fetchTasks(Query.instanceScoped(job, 0))).size();
     }
   }
 }

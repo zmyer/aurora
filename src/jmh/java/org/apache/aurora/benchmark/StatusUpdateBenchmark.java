@@ -13,6 +13,7 @@
  */
 package org.apache.aurora.benchmark;
 
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -22,7 +23,6 @@ import java.util.concurrent.TimeUnit;
 
 import javax.inject.Singleton;
 
-import com.google.common.base.Optional;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
 import com.google.common.util.concurrent.AbstractExecutionThreadService;
@@ -53,6 +53,7 @@ import org.apache.aurora.scheduler.TaskStatusHandlerImpl;
 import org.apache.aurora.scheduler.TierModule;
 import org.apache.aurora.scheduler.base.AsyncUtil;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
+import org.apache.aurora.scheduler.config.CliOptions;
 import org.apache.aurora.scheduler.configuration.executor.ExecutorSettings;
 import org.apache.aurora.scheduler.events.EventSink;
 import org.apache.aurora.scheduler.events.PubsubEvent;
@@ -61,7 +62,12 @@ import org.apache.aurora.scheduler.filter.SchedulingFilterImpl;
 import org.apache.aurora.scheduler.mesos.Driver;
 import org.apache.aurora.scheduler.mesos.DriverFactory;
 import org.apache.aurora.scheduler.mesos.DriverSettings;
+import org.apache.aurora.scheduler.mesos.FrameworkInfoFactory;
+import org.apache.aurora.scheduler.mesos.MesosCallbackHandler;
+import org.apache.aurora.scheduler.mesos.MesosCallbackHandler.MesosCallbackHandlerImpl;
 import org.apache.aurora.scheduler.mesos.MesosSchedulerImpl;
+import org.apache.aurora.scheduler.mesos.ProtosConversion;
+import org.apache.aurora.scheduler.mesos.SchedulerDriverModule;
 import org.apache.aurora.scheduler.mesos.TestExecutorSettings;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.preemptor.ClusterStateImpl;
@@ -69,11 +75,11 @@ import org.apache.aurora.scheduler.scheduling.RescheduleCalculator;
 import org.apache.aurora.scheduler.state.StateModule;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.IServerInfo;
-import org.apache.mesos.Protos;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.apache.mesos.Scheduler;
+import org.apache.mesos.v1.Protos;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -114,7 +120,7 @@ public class StatusUpdateBenchmark {
    */
   private static final class SlowStorageWrapper implements Storage {
     private final Storage underlyingStorage;
-    private Optional<Amount<Long, Time>> latency = Optional.absent();
+    private Optional<Amount<Long, Time>> latency = Optional.empty();
 
     private SlowStorageWrapper(Storage underlyingStorage) {
       this.underlyingStorage = requireNonNull(underlyingStorage);
@@ -171,10 +177,10 @@ public class StatusUpdateBenchmark {
   @Setup(Level.Trial)
   public void setUpBenchmark() {
     eventBus = new EventBus();
-    storage = new SlowStorageWrapper(DbUtil.createStorage());
+    storage = new SlowStorageWrapper(MemStorageModule.newEmptyStorage());
 
     Injector injector = Guice.createInjector(
-        new StateModule(),
+        new StateModule(new CliOptions()),
         new TierModule(TaskTestUtil.TIER_CONFIG),
         new AbstractModule() {
           @Override
@@ -182,8 +188,10 @@ public class StatusUpdateBenchmark {
             bind(Driver.class).toInstance(new FakeDriver());
             bind(Scheduler.class).to(MesosSchedulerImpl.class);
             bind(MesosSchedulerImpl.class).in(Singleton.class);
+            bind(MesosCallbackHandler.class).to(MesosCallbackHandlerImpl.class);
+            bind(MesosCallbackHandlerImpl.class).in(Singleton.class);
             bind(Executor.class)
-                .annotatedWith(MesosSchedulerImpl.SchedulerExecutor.class)
+                .annotatedWith(SchedulerDriverModule.SchedulerExecutor.class)
                 .toInstance(AsyncUtil.singleThreadLoggingScheduledExecutor(
                     "SchedulerImpl-%d",
                     LoggerFactory.getLogger(StatusUpdateBenchmark.class)));
@@ -201,11 +209,11 @@ public class StatusUpdateBenchmark {
             bind(DriverSettings.class).toInstance(
                 new DriverSettings(
                     "fakemaster",
-                    Optional.absent(),
-                    Protos.FrameworkInfo.newBuilder()
-                        .setUser("framework user")
-                        .setName("test framework")
-                        .build()));
+                    Optional.empty()));
+            bind(FrameworkInfoFactory.class).toInstance(() -> Protos.FrameworkInfo.newBuilder()
+                    .setUser("framework user")
+                    .setName("test framework")
+                    .build());
             bind(RescheduleCalculator.class).toInstance(new FakeRescheduleCalculator());
             bind(Clock.class).toInstance(new FakeClock());
             bind(ExecutorSettings.class).toInstance(TestExecutorSettings.THERMOS_EXECUTOR);
@@ -278,7 +286,7 @@ public class StatusUpdateBenchmark {
           .setTaskId(Protos.TaskID.newBuilder().setValue(taskId).build())
           .build();
 
-      scheduler.statusUpdate(new FakeSchedulerDriver(), status);
+      scheduler.statusUpdate(new FakeSchedulerDriver(), ProtosConversion.convert(status));
     }
 
     // Wait for all task transitions to complete.

@@ -34,7 +34,6 @@ import org.apache.aurora.gen.TaskConfig;
 import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.events.PubsubEvent.TaskStateChange;
 import org.apache.aurora.scheduler.events.PubsubEvent.TasksDeleted;
-import org.apache.aurora.scheduler.events.PubsubEvent.Vetoed;
 import org.apache.aurora.scheduler.filter.SchedulingFilter.Veto;
 import org.apache.aurora.scheduler.http.TestUtils;
 import org.apache.aurora.scheduler.scheduling.TaskGroup;
@@ -43,6 +42,8 @@ import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.junit.Before;
 import org.junit.Test;
+
+import static org.apache.aurora.gen.Resource.numCpus;
 
 import static org.junit.Assert.assertEquals;
 
@@ -60,7 +61,8 @@ public class NearestFitTest {
   private static final Veto SEVERITY_4_PORTS =
       Veto.insufficientResources("ports", RESOURCE_MAX_SCORE);
 
-  private static final ITaskConfig TASK = ITaskConfig.build(new TaskConfig().setNumCpus(1.0));
+  private static final ITaskConfig TASK = ITaskConfig.build(new TaskConfig()
+          .setResources(ImmutableSet.of(numCpus(1.0))));
   private static final TaskGroupKey GROUP_KEY = TaskGroupKey.from(TASK);
 
   private FakeTicker ticker;
@@ -136,7 +138,7 @@ public class NearestFitTest {
     pendingTaskGroups.add(taskGroup);
 
     // Creating vetoes for CPU and RAM.
-    nearest.vetoed(new Vetoed(taskGroupKey, vetoes(SEVERITY_4_CPU, SEVERITY_4_RAM)));
+    nearest.vetoed(taskGroupKey, vetoes(SEVERITY_4_CPU, SEVERITY_4_RAM));
 
     // Testing.
     Map<TaskGroupKey, List<String>> mimicPendingReasons = new LinkedHashMap<>();
@@ -152,7 +154,7 @@ public class NearestFitTest {
   }
 
   private void vetoed(Veto... vetoes) {
-    nearest.vetoed(new Vetoed(GROUP_KEY, ImmutableSet.copyOf(vetoes)));
+    nearest.vetoed(GROUP_KEY, ImmutableSet.copyOf(vetoes));
   }
 
   private void assertNearest(Veto... vetoes) {

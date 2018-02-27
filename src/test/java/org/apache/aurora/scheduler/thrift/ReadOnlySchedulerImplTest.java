@@ -15,13 +15,13 @@ package org.apache.aurora.scheduler.thrift;
 
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
-
 import java.util.stream.Collectors;
+
 import javax.annotation.Nullable;
 
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -83,7 +83,6 @@ import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateDetails;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateQuery;
-import org.apache.aurora.scheduler.storage.entities.IJobUpdateSummary;
 import org.apache.aurora.scheduler.storage.entities.IRange;
 import org.apache.aurora.scheduler.storage.entities.IResponse;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
@@ -92,6 +91,9 @@ import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
 import org.junit.Before;
 import org.junit.Test;
 
+import static org.apache.aurora.gen.Resource.diskMb;
+import static org.apache.aurora.gen.Resource.numCpus;
+import static org.apache.aurora.gen.Resource.ramMb;
 import static org.apache.aurora.gen.ResponseCode.INVALID_REQUEST;
 import static org.apache.aurora.scheduler.base.Numbers.convertRanges;
 import static org.apache.aurora.scheduler.base.Numbers.toRanges;
@@ -249,7 +251,7 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
         .setCronSchedule(cronSchedule)
         .setTaskConfig(task);
     expect(cronPredictor.predictNextRun(CrontabEntry.parse(cronSchedule)))
-        .andReturn(Optional.absent())
+        .andReturn(Optional.empty())
         .anyTimes();
     storageUtil.expectTaskFetch(Query.roleScoped(ROLE));
     Set<JobConfiguration> jobOnly = ImmutableSet.of(job);
@@ -527,7 +529,8 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     IJobKey key = JobKeys.from("test", "test", "test");
 
     TaskConfig firstGroupTask = defaultTask(true);
-    TaskConfig secondGroupTask = defaultTask(true).setNumCpus(2);
+    TaskConfig secondGroupTask = defaultTask(true)
+            .setResources(ImmutableSet.of(numCpus(2)));
 
     IScheduledTask first1 = IScheduledTask.build(new ScheduledTask()
         .setAssignedTask(new AssignedTask().setTask(firstGroupTask).setInstanceId(0)));
@@ -586,22 +589,22 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
   @Test
   public void testGetJobUpdateSummaries() throws Exception {
     JobUpdateQuery query = new JobUpdateQuery().setRole(ROLE);
-    List<JobUpdateSummary> summaries = createJobUpdateSummaries(5);
-    expect(storageUtil.jobUpdateStore.fetchJobUpdateSummaries(IJobUpdateQuery.build(query)))
-        .andReturn(IJobUpdateSummary.listFromBuilders(summaries));
+    Set<JobUpdateDetails> details = createJobUpdateDetails(5);
+    expect(storageUtil.jobUpdateStore.fetchJobUpdates(IJobUpdateQuery.build(query)))
+        .andReturn(IJobUpdateDetails.listFromBuilders(details));
 
     control.replay();
 
     Response response = assertOkResponse(thrift.getJobUpdateSummaries(query));
     assertEquals(
-        summaries,
+        details.stream().map(u -> u.getUpdate().getSummary()).collect(Collectors.toList()),
         response.getResult().getGetJobUpdateSummariesResult().getUpdateSummaries());
   }
 
   @Test
   public void testGetJobUpdateDetails() throws Exception {
     JobUpdateDetails details = createJobUpdateDetails();
-    expect(storageUtil.jobUpdateStore.fetchJobUpdateDetails(UPDATE_KEY))
+    expect(storageUtil.jobUpdateStore.fetchJobUpdate(UPDATE_KEY))
         .andReturn(Optional.of(IJobUpdateDetails.build(details)));
 
     control.replay();
@@ -618,7 +621,7 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
   public void testGetJobUpdateDetailsQuery() throws Exception {
     JobUpdateQuery query = new JobUpdateQuery().setRole(ROLE);
     List<IJobUpdateDetails> details = IJobUpdateDetails.listFromBuilders(createJobUpdateDetails(5));
-    expect(storageUtil.jobUpdateStore.fetchJobUpdateDetails(IJobUpdateQuery.build(query)))
+    expect(storageUtil.jobUpdateStore.fetchJobUpdates(IJobUpdateQuery.build(query)))
         .andReturn(details);
 
     control.replay();
@@ -640,16 +643,16 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     return builder.build();
   }
 
-  private static List<JobUpdateDetails> createJobUpdateDetails(int count) {
+  private static Set<JobUpdateDetails> createJobUpdateDetails(int count) {
     List<JobUpdateSummary> summaries = createJobUpdateSummaries(count);
     return summaries.stream()
         .map(jobUpdateSummary ->
             new JobUpdateDetails().setUpdate(new JobUpdate().setSummary(jobUpdateSummary)))
-        .collect(Collectors.toList());
+        .collect(Collectors.toSet());
   }
 
   private static JobUpdateDetails createJobUpdateDetails() {
-    return createJobUpdateDetails(1).get(0);
+    return createJobUpdateDetails(1).stream().findFirst().get();
   }
 
   @Test
@@ -679,7 +682,11 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     IScheduledTask task1 = IScheduledTask.build(new ScheduledTask()
         .setAssignedTask(new AssignedTask().setTask(immediateTaskConfig)));
     IScheduledTask task2 = IScheduledTask.build(new ScheduledTask()
-        .setAssignedTask(new AssignedTask().setTask(immediateTaskConfig.setNumCpus(2))));
+        .setAssignedTask(new AssignedTask().setTask(immediateTaskConfig
+            .setResources(ImmutableSet.of(
+                    numCpus(2),
+                    ramMb(1024),
+                    diskMb(1024))))));
 
     TaskConfig immediateTaskConfigTwo = defaultTask(false)
         .setJob(JOB_KEY.newBuilder().setRole(bazRole).setName("immediateTwo"))
@@ -731,8 +738,8 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
 
   @Test
   public void testGetJobUpdateDetailsInvalidId() throws Exception {
-    expect(storageUtil.jobUpdateStore.fetchJobUpdateDetails(UPDATE_KEY))
-        .andReturn(Optional.absent());
+    expect(storageUtil.jobUpdateStore.fetchJobUpdate(UPDATE_KEY))
+        .andReturn(Optional.empty());
 
     control.replay();
 
@@ -754,7 +761,7 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     makeTasks(30, 40, task4, tasks);
     makeTasks(40, 50, task5, tasks);
 
-    expect(storageUtil.jobStore.fetchJob(JOB_KEY)).andReturn(Optional.absent());
+    expect(storageUtil.jobStore.fetchJob(JOB_KEY)).andReturn(Optional.empty());
     storageUtil.expectTaskFetch(Query.jobScoped(JOB_KEY).active(), tasks.build());
 
     control.replay();
@@ -791,7 +798,7 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
     makeTasks(10, 20, task2, tasks);
     makeTasks(20, 30, task3, tasks);
 
-    expect(storageUtil.jobStore.fetchJob(JOB_KEY)).andReturn(Optional.absent());
+    expect(storageUtil.jobStore.fetchJob(JOB_KEY)).andReturn(Optional.empty());
     storageUtil.expectTaskFetch(Query.jobScoped(JOB_KEY).active(), tasks.build());
 
     control.replay();
@@ -815,7 +822,7 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
 
   @Test
   public void testGetJobUpdateDiffWithUnchanged() throws Exception {
-    expect(storageUtil.jobStore.fetchJob(JOB_KEY)).andReturn(Optional.absent());
+    expect(storageUtil.jobStore.fetchJob(JOB_KEY)).andReturn(Optional.empty());
     storageUtil.expectTaskFetch(
         Query.jobScoped(JOB_KEY).active(),
         ImmutableSet.copyOf(makeDefaultScheduledTasks(10)));
@@ -856,8 +863,11 @@ public class ReadOnlySchedulerImplTest extends EasyMockTest {
   @Test
   public void testGetJobUpdateDiffInvalidConfig() throws Exception {
     control.replay();
-    TaskConfig task = defaultTask(false).setNumCpus(-1);
-    task.unsetResources();
+    TaskConfig task = defaultTask(false)
+            .setResources(ImmutableSet.of(
+                    numCpus(-1),
+                    ramMb(1024),
+                    diskMb(1024)));
 
     JobUpdateRequest request =
         new JobUpdateRequest().setTaskConfig(task);

@@ -17,6 +17,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -24,7 +25,6 @@ import java.util.concurrent.TimeUnit;
 
 import javax.inject.Inject;
 
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
@@ -36,7 +36,6 @@ import com.google.common.util.concurrent.SettableFuture;
 
 import org.apache.aurora.scheduler.app.local.simulator.events.Started;
 import org.apache.aurora.scheduler.mesos.DriverFactory;
-import org.apache.mesos.Protos;
 import org.apache.mesos.Protos.ExecutorID;
 import org.apache.mesos.Protos.Filters;
 import org.apache.mesos.Protos.FrameworkID;
@@ -52,12 +51,11 @@ import org.apache.mesos.Protos.TaskState;
 import org.apache.mesos.Protos.TaskStatus;
 import org.apache.mesos.Scheduler;
 import org.apache.mesos.SchedulerDriver;
+import org.apache.mesos.v1.Protos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static java.util.Objects.requireNonNull;
-
-import static org.apache.mesos.Protos.FrameworkInfo;
 
 /**
  * A simulated master for use in scheduler testing.
@@ -107,7 +105,7 @@ public class FakeMaster implements SchedulerDriver, DriverFactory {
   public SchedulerDriver create(
       Scheduler scheduler,
       Optional<Protos.Credential> credentials,
-      FrameworkInfo frameworkInfo,
+      Protos.FrameworkInfo frameworkInfo,
       String master) {
 
     schedulerFuture.set(scheduler);

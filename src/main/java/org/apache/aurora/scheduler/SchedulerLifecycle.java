@@ -77,7 +77,7 @@ import static org.apache.aurora.common.zookeeper.SingletonService.LeadershipList
  *       {@link LeaderControl#advertise() advertise()}.</li>
  * </ol>
  * If this call order is broken, calls will fail by throwing
- * {@link java.lang.IllegalStateException}.
+ * {@link IllegalStateException}.
  * <p>
  * At any point in the lifecycle, the scheduler will respond to
  * {@link LeadershipListener#onDefeated()
@@ -170,9 +170,6 @@ public class SchedulerLifecycle implements EventSubscriber {
   }
 
   @VisibleForTesting
-  static final String REGISTERED_GAUGE = "framework_registered";
-
-  @VisibleForTesting
   static String stateGaugeName(State state) {
     return "scheduler_lifecycle_" + state;
   }
@@ -193,14 +190,6 @@ public class SchedulerLifecycle implements EventSubscriber {
     requireNonNull(delayedActions);
     requireNonNull(shutdownRegistry);
 
-    statsProvider.makeGauge(
-        REGISTERED_GAUGE,
-        new Supplier<Integer>() {
-          @Override
-          public Integer get() {
-            return registrationAcked.get() ? 1 : 0;
-          }
-        });
     for (final State state : State.values()) {
       statsProvider.makeGauge(
           stateGaugeName(state),

@@ -18,13 +18,22 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import javax.inject.Singleton;
 
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.AbstractModule;
 import com.google.inject.PrivateModule;
+import com.google.inject.TypeLiteral;
 
+import org.apache.aurora.common.quantity.Time;
 import org.apache.aurora.scheduler.SchedulerServicesModule;
 import org.apache.aurora.scheduler.base.AsyncUtil;
+import org.apache.aurora.scheduler.base.TaskGroupKey;
+import org.apache.aurora.scheduler.config.types.TimeAmount;
 import org.apache.aurora.scheduler.events.PubsubEventModule;
+import org.apache.aurora.scheduler.preemptor.BiCache;
+import org.apache.aurora.scheduler.preemptor.BiCache.BiCacheSettings;
+import org.apache.aurora.scheduler.storage.entities.IInstanceKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,15 +43,31 @@ import org.slf4j.LoggerFactory;
 public class UpdaterModule extends AbstractModule {
   private static final Logger LOG = LoggerFactory.getLogger(UpdaterModule.class);
 
-  private final ScheduledExecutorService executor;
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-enable_update_affinity",
+        description = "Enable best-effort affinity of task updates.",
+        arity = 1)
+    public boolean enableAffinity = false;
 
-  public UpdaterModule() {
-    this(AsyncUtil.singleThreadLoggingScheduledExecutor("updater-%d", LOG));
+    @Parameter(names = "-update_affinity_reservation_hold_time",
+        description = "How long to wait for a reserved agent to reoffer freed up resources.")
+    public TimeAmount affinityExpiration = new TimeAmount(3L, Time.MINUTES);
+  }
+
+  private final ScheduledExecutorService executor;
+  private final Options options;
+
+  public UpdaterModule(Options options) {
+    this(
+        AsyncUtil.singleThreadLoggingScheduledExecutor("updater-%d", LOG),
+        options);
   }
 
   @VisibleForTesting
-  UpdaterModule(ScheduledExecutorService executor) {
+  UpdaterModule(ScheduledExecutorService executor, Options options) {
     this.executor = Objects.requireNonNull(executor);
+    this.options = options;
   }
 
   @Override
@@ -50,6 +75,18 @@ public class UpdaterModule extends AbstractModule {
     install(new PrivateModule() {
       @Override
       protected void configure() {
+        if (options.enableAffinity) {
+          bind(BiCacheSettings.class).toInstance(
+              new BiCacheSettings(options.affinityExpiration, "update_affinity"));
+          bind(new TypeLiteral<BiCache<IInstanceKey, TaskGroupKey>>() { }).in(Singleton.class);
+          bind(UpdateAgentReserver.class).to(UpdateAgentReserver.UpdateAgentReserverImpl.class);
+          bind(UpdateAgentReserver.UpdateAgentReserverImpl.class).in(Singleton.class);
+        } else {
+          bind(UpdateAgentReserver.class).to(UpdateAgentReserver.NullAgentReserver.class);
+          bind(UpdateAgentReserver.NullAgentReserver.class).in(Singleton.class);
+        }
+        expose(UpdateAgentReserver.class);
+
         bind(ScheduledExecutorService.class).toInstance(executor);
         bind(UpdateFactory.class).to(UpdateFactory.UpdateFactoryImpl.class);
         bind(UpdateFactory.UpdateFactoryImpl.class).in(Singleton.class);

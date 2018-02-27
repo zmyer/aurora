@@ -1,0 +1,131 @@
+.state-machine {
+  position: relative;
+  padding-left: 100px;
+  margin: 20px 0px;
+
+  ul {
+    list-style-type: none;
+  }
+
+  li {
+    position:relative;
+    margin-bottom: 0;
+    min-height: 45px;
+    padding-bottom: 10px;
+    color: $secondary_font_color;
+  }
+
+  li.active {
+    color: $primary_font_color;
+  }
+
+  /* Bullets */
+  li:after {
+    content: '';
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background-color: #EEE;
+    border: 2px solid #DDD;
+    position: absolute;
+    left: -20px;
+    top: 5px;
+  }
+
+  li.active.error:after {
+    background-color: $colors_error_light;
+    border-color: $colors_error;
+  }
+
+  li.active.okay:after {
+    background-color: $colors_success_light;
+    border-color: $colors_success;
+  }
+
+  li.active.in-progress:after {
+    background-color: $colors_highlight_light;
+    border-color: $colors_highlight;
+  }
+
+  li.active.attention:after {
+    background-color: $colors_warning_light;
+    border-color: $colors_warning;
+  }
+
+  /* Lines */
+  li:before {
+    content:"";
+    position: absolute;
+    left: -16px;
+    background-color: #DDD;
+    height: 100%;
+    width: 3px;
+  }
+
+  ul.okay li:nth-last-child(2):before {
+    background: linear-gradient($grid_highlight_color, $grid_highlight_color, $colors_success);
+  }
+
+  ul.error li:nth-last-child(2):before {
+    background: linear-gradient($grid_highlight_color, $grid_highlight_color, $colors_error);
+  }
+
+  ul.attention li:nth-last-child(2):before {
+    background: linear-gradient($grid_highlight_color, $grid_highlight_color, $colors_warning);
+  }
+
+  ul.in-progress li:nth-last-child(2):before {
+    background: linear-gradient($grid_highlight_color, $grid_highlight_color, $colors_highlight);
+  }
+
+  ul.error li:last-child:before {
+    background-color: $colors_error;
+  }
+
+  ul.okay li:last-child:before {
+    background-color: $colors_success;
+  }
+
+  ul.attention li:last-child:before {
+    background-color: $colors_warning;
+  }
+
+  ul.in-progress li:last-child:before {
+    background-color: $colors_highlight;
+  }
+
+  li:first-child:before {
+    top: 6px;
+  }
+
+  li:last-child:before {
+    height: 6px;
+  }
+
+  .state-machine-item-details {
+    display: inline-block;
+    position: relative;
+    width: 100%;
+  }
+
+  .state-machine-item-state {
+    font-size: 14px;
+    font-weight: 500;
+    width: 100px;
+    display: inline-block;
+  }
+
+  .state-machine-item-time {
+    font-size: 11px;
+    color: $secondary_font_color;
+    position: absolute;
+    left: -120px;
+    text-align: right;
+  }
+
+  .state-machine-item-message {
+    display: block;
+    font-size: 12px;
+    color: $secondary_font_color;
+  }
+}

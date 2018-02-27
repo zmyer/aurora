@@ -13,6 +13,8 @@
  */
 package org.apache.aurora.scheduler.http;
 
+import java.util.Optional;
+
 import javax.inject.Inject;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
@@ -22,9 +24,11 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 
-import com.google.common.base.Optional;
+import com.google.gson.ExclusionStrategy;
+import com.google.gson.FieldAttributes;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 
-import org.apache.aurora.common.thrift.Util;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.Work.Quiet;
@@ -76,7 +80,7 @@ public class StructDump extends JerseyTemplateServlet {
     return dumpEntity(
         "Task " + taskId,
         storeProvider ->
-            storeProvider.getTaskStore().fetchTask(taskId).transform(IScheduledTask::newBuilder));
+            storeProvider.getTaskStore().fetchTask(taskId).map(IScheduledTask::newBuilder));
   }
 
   /**
@@ -95,15 +99,40 @@ public class StructDump extends JerseyTemplateServlet {
     final IJobKey jobKey = JobKeys.from(role, environment, job);
     return dumpEntity("Cron job " + JobKeys.canonicalString(jobKey),
         storeProvider -> storeProvider.getCronJobStore().fetchJob(jobKey)
-            .transform(IJobConfiguration::newBuilder));
+            .map(IJobConfiguration::newBuilder));
   }
 
-  private Response dumpEntity(final String id, final Quiet<Optional<? extends TBase<?, ?>>> work) {
+  private static final Gson GSON = new GsonBuilder()
+      .setPrettyPrinting()
+      .setExclusionStrategies(new ExclusionStrategy() {
+        @Override
+        public boolean shouldSkipField(FieldAttributes f) {
+          if (f.getName().startsWith("_")) {
+            return true;
+          }
+          return f.getDeclaredClass().getName().contains("$_Fields");
+        }
+
+        @Override
+        public boolean shouldSkipClass(Class<?> clazz) {
+          return false;
+        }
+      })
+      .setFieldNamingStrategy(f -> {
+        switch (f.getName()) {
+          case "setField_": return "key";
+          case "value_": return "value";
+          default: return f.getName();
+        }
+      })
+      .create();
+
+  private Response dumpEntity(String id, Quiet<Optional<? extends TBase<?, ?>>> work) {
     return fillTemplate(template -> {
       template.setAttribute("id", id);
       Optional<? extends TBase<?, ?>> struct = storage.read(work);
       if (struct.isPresent()) {
-        template.setAttribute("structPretty", Util.prettyPrint(struct.get()));
+        template.setAttribute("structPretty", GSON.toJson(struct.get()));
         template.setAttribute("exception", null);
       } else {
         template.setAttribute("exception", "Entity not found");

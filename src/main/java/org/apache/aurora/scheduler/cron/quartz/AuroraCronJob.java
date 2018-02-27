@@ -16,6 +16,7 @@ package org.apache.aurora.scheduler.cron.quartz;
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
 import java.util.Date;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -25,9 +26,7 @@ import javax.inject.Inject;
 import javax.inject.Qualifier;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
 
 import org.apache.aurora.common.stats.Stats;
 import org.apache.aurora.common.stats.StatsProvider;
@@ -92,7 +91,6 @@ class AuroraCronJob implements Job, EventSubscriber {
   private final StateManager stateManager;
   private final BackoffHelper delayedStartBackoff;
   private final BatchWorker<NoResult> batchWorker;
-  private final Set<IJobKey> killFollowups = Sets.newConcurrentHashSet();
 
   /**
    * Annotation for the max cron batch size.
@@ -145,17 +143,16 @@ class AuroraCronJob implements Job, EventSubscriber {
 
     // Prevent a concurrent run for this job in case a previous trigger took longer to run.
     // This approach relies on saving the "work in progress" token within the job context itself
-    // (see below) and relying on killFollowups to signal "work completion".
+    // (see below).
     if (context.getJobDetail().getJobDataMap().containsKey(path)) {
       CRON_JOB_CONCURRENT_RUNS.incrementAndGet();
-      if (killFollowups.contains(key)) {
-        context.getJobDetail().getJobDataMap().remove(path);
-        killFollowups.remove(key);
-        LOG.info("Resetting job context for cron {}", path);
-      } else {
+      if (context.getJobDetail().getJobDataMap().get(path) == null) {
         LOG.info("Ignoring trigger as another concurrent run is active for cron {}", path);
         return;
       }
+
+      context.getJobDetail().getJobDataMap().remove(path);
+      LOG.info("Resetting job context for cron {}", path);
     }
 
     CompletableFuture<NoResult> scheduleResult = batchWorker.<NoResult>execute(storeProvider -> {
@@ -196,13 +193,15 @@ class AuroraCronJob implements Job, EventSubscriber {
             stateManager.changeState(
                 storeProvider,
                 taskId,
-                Optional.absent(),
+                Optional.empty(),
                 KILLING,
                 KILL_AUDIT_MESSAGE);
           }
 
           LOG.info("Waiting for job to terminate before launching cron job " + path);
           // Use job detail map to signal a "work in progress" condition to subsequent triggers.
+          // A null value indicates that work is still in progress, while a non-null value (key in
+          // this case) indicates that the work has completed.
           context.getJobDetail().getJobDataMap().put(path, null);
           batchWorker.executeWithReplay(
               delayedStartBackoff.getBackoffStrategy(),
@@ -218,7 +217,7 @@ class AuroraCronJob implements Job, EventSubscriber {
                 }
               })
               .thenAccept(ignored -> {
-                killFollowups.add(key);
+                context.getJobDetail().getJobDataMap().put(path, key);
                 LOG.info("Finished delayed launch for cron " + path);
               });
           break;

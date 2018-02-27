@@ -14,6 +14,8 @@
 package org.apache.aurora.scheduler.pruning;
 
 import java.util.Set;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javax.inject.Inject;
@@ -34,7 +36,6 @@ import org.apache.aurora.gen.apiConstants;
 import org.apache.aurora.scheduler.BatchWorker;
 import org.apache.aurora.scheduler.SchedulerModule.TaskEventBatchWorker;
 import org.apache.aurora.scheduler.async.AsyncModule.AsyncExecutor;
-import org.apache.aurora.scheduler.async.DelayExecutor;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.state.StateManager;
@@ -61,10 +62,10 @@ public class TaskHistoryPruner implements EventSubscriber {
   @VisibleForTesting
   static final String TASKS_PRUNED = "tasks_pruned";
 
-  private final DelayExecutor executor;
+  private final ScheduledExecutorService executor;
   private final StateManager stateManager;
   private final Clock clock;
-  private final HistoryPrunnerSettings settings;
+  private final HistoryPrunerSettings settings;
   private final Storage storage;
   private final Lifecycle lifecycle;
   private final TaskEventBatchWorker batchWorker;
@@ -78,12 +79,12 @@ public class TaskHistoryPruner implements EventSubscriber {
     }
   };
 
-  static class HistoryPrunnerSettings {
+  static class HistoryPrunerSettings {
     private final long pruneThresholdMillis;
     private final long minRetentionThresholdMillis;
     private final int perJobHistoryGoal;
 
-    HistoryPrunnerSettings(
+    HistoryPrunerSettings(
         Amount<Long, Time> inactivePruneThreshold,
         Amount<Long, Time> minRetentionThreshold,
         int perJobHistoryGoal) {
@@ -96,10 +97,10 @@ public class TaskHistoryPruner implements EventSubscriber {
 
   @Inject
   TaskHistoryPruner(
-      @AsyncExecutor DelayExecutor executor,
+      @AsyncExecutor ScheduledExecutorService executor,
       StateManager stateManager,
       Clock clock,
-      HistoryPrunnerSettings settings,
+      HistoryPrunerSettings settings,
       Storage storage,
       Lifecycle lifecycle,
       TaskEventBatchWorker batchWorker,
@@ -161,7 +162,7 @@ public class TaskHistoryPruner implements EventSubscriber {
 
     LOG.debug("Prune task {} in {} ms.", taskId, timeRemaining);
 
-    executor.execute(
+    executor.schedule(
         shutdownOnError(
             lifecycle,
             LOG,
@@ -170,7 +171,8 @@ public class TaskHistoryPruner implements EventSubscriber {
               LOG.info("Pruning expired inactive task " + taskId);
               deleteTasks(ImmutableSet.of(taskId));
             }),
-        Amount.of(timeRemaining, Time.MILLISECONDS));
+        timeRemaining,
+        TimeUnit.MILLISECONDS);
 
     executor.execute(
         shutdownOnError(

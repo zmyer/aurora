@@ -13,7 +13,8 @@
  */
 package org.apache.aurora.scheduler.updater;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
+
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Range;
@@ -28,6 +29,7 @@ import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.entities.IInstanceKey;
 import org.apache.aurora.scheduler.storage.entities.IInstanceTaskConfig;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateInstructions;
+import org.apache.aurora.scheduler.storage.entities.IJobUpdateKey;
 import org.apache.aurora.scheduler.storage.entities.IRange;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
@@ -44,7 +46,9 @@ interface InstanceActionHandler {
       IJobUpdateInstructions instructions,
       MutableStoreProvider storeProvider,
       StateManager stateManager,
-      JobUpdateStatus status);
+      UpdateAgentReserver reserver,
+      JobUpdateStatus status,
+      IJobUpdateKey key);
 
   Logger LOG = LoggerFactory.getLogger(InstanceActionHandler.class);
 
@@ -52,7 +56,7 @@ interface InstanceActionHandler {
       MutableStoreProvider storeProvider,
       IInstanceKey instance) {
 
-    return Optional.fromNullable(Iterables.getOnlyElement(
+    return Optional.ofNullable(Iterables.getOnlyElement(
         storeProvider.getTaskStore().fetchTasks(Query.instanceScoped(instance).active()), null));
   }
 
@@ -84,7 +88,9 @@ interface InstanceActionHandler {
         IJobUpdateInstructions instructions,
         MutableStoreProvider storeProvider,
         StateManager stateManager,
-        JobUpdateStatus status) {
+        UpdateAgentReserver reserver,
+        JobUpdateStatus status,
+        IJobUpdateKey key) {
 
       Optional<IScheduledTask> task = getExistingTask(storeProvider, instance);
       if (task.isPresent()) {
@@ -103,18 +109,26 @@ interface InstanceActionHandler {
             ImmutableSet.of(instance.getInstanceId()));
       }
       // A task state transition will trigger re-evaluation in this case, rather than a timer.
-      return Optional.absent();
+      return Optional.empty();
     }
   }
 
   class KillTask implements InstanceActionHandler {
+    private final boolean reserveForReplacement;
+
+    KillTask(boolean reserveForReplacement) {
+      this.reserveForReplacement = reserveForReplacement;
+    }
+
     @Override
     public Optional<Amount<Long, Time>> getReevaluationDelay(
         IInstanceKey instance,
         IJobUpdateInstructions instructions,
         MutableStoreProvider storeProvider,
         StateManager stateManager,
-        JobUpdateStatus status) {
+        UpdateAgentReserver reserver,
+        JobUpdateStatus status,
+        IJobUpdateKey key) {
 
       Optional<IScheduledTask> task = getExistingTask(storeProvider, instance);
       if (task.isPresent()) {
@@ -122,16 +136,19 @@ interface InstanceActionHandler {
         stateManager.changeState(
             storeProvider,
             Tasks.id(task.get()),
-            Optional.absent(),
+            Optional.empty(),
             ScheduleStatus.KILLING,
-            Optional.of("Killed for job update."));
+            Optional.of("Killed for job update " + key.getId()));
+        if (reserveForReplacement && task.get().getAssignedTask().isSetSlaveId()) {
+          reserver.reserve(task.get().getAssignedTask().getSlaveId(), instance);
+        }
       } else {
         // Due to async event processing it's possible to have a race between task event
         // and it's deletion from the store. This is a perfectly valid case.
         LOG.info("No active instance " + instance + " to kill while " + status);
       }
       // A task state transition will trigger re-evaluation in this case, rather than a timer.
-      return Optional.absent();
+      return Optional.empty();
     }
   }
 
@@ -142,7 +159,9 @@ interface InstanceActionHandler {
         IJobUpdateInstructions instructions,
         MutableStoreProvider storeProvider,
         StateManager stateManager,
-        JobUpdateStatus status) {
+        UpdateAgentReserver reserver,
+        JobUpdateStatus status,
+        IJobUpdateKey key) {
 
       return Optional.of(Amount.of(
           (long) instructions.getSettings().getMinWaitInInstanceRunningMs(),

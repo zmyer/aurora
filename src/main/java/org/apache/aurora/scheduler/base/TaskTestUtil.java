@@ -14,11 +14,11 @@
 package org.apache.aurora.scheduler.base;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.aurora.gen.AssignedTask;
@@ -31,6 +31,7 @@ import org.apache.aurora.gen.Identity;
 import org.apache.aurora.gen.LimitConstraint;
 import org.apache.aurora.gen.MesosFetcherURI;
 import org.apache.aurora.gen.Metadata;
+import org.apache.aurora.gen.PartitionPolicy;
 import org.apache.aurora.gen.Resource;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
@@ -46,13 +47,15 @@ import org.apache.aurora.scheduler.configuration.ConfigurationManager;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager.ConfigurationManagerSettings;
 import org.apache.aurora.scheduler.configuration.executor.ExecutorConfig;
 import org.apache.aurora.scheduler.configuration.executor.ExecutorSettings;
+import org.apache.aurora.scheduler.filter.AttributeAggregate;
+import org.apache.aurora.scheduler.filter.SchedulingFilter.ResourceRequest;
+import org.apache.aurora.scheduler.storage.durability.ThriftBackfill;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
-import org.apache.mesos.Protos;
-import org.apache.mesos.Protos.ExecutorID;
-import org.apache.mesos.Protos.ExecutorInfo;
+import org.apache.mesos.v1.Protos;
+import org.apache.mesos.v1.Protos.ExecutorID;
+import org.apache.mesos.v1.Protos.ExecutorInfo;
 
 /**
  * Convenience methods for working with tasks.
@@ -62,19 +65,21 @@ import org.apache.mesos.Protos.ExecutorInfo;
  */
 public final class TaskTestUtil {
 
-  public static final IJobKey JOB = JobKeys.from("role", "dev", "job");
+  public static final IJobKey JOB = JobKeys.from("role", "devel", "job");
   public static final TierInfo REVOCABLE_TIER =
       new TierInfo(true /* preemptible */, true /* revocable */);
   public static final TierInfo DEV_TIER =
       new TierInfo(true /* preemptible */, false /* revocable */);
   public static final TierInfo PREFERRED_TIER =
       new TierInfo(false /* preemptible */, false /* revocable */);
+  public static final String REVOCABLE_TIER_NAME = "tier-revocable";
   public static final String PROD_TIER_NAME = "tier-prod";
   public static final String DEV_TIER_NAME = "tier-dev";
   public static final TierConfig TIER_CONFIG =
       new TierConfig(DEV_TIER_NAME, ImmutableMap.of(
           PROD_TIER_NAME, PREFERRED_TIER,
-          DEV_TIER_NAME, DEV_TIER
+          DEV_TIER_NAME, DEV_TIER,
+          REVOCABLE_TIER_NAME, REVOCABLE_TIER
       ));
   public static final TierManager TIER_MANAGER = new TierManager.TierManagerImpl(TIER_CONFIG);
   public static final ThriftBackfill THRIFT_BACKFILL = new ThriftBackfill(TIER_MANAGER);
@@ -82,11 +87,12 @@ public final class TaskTestUtil {
       new ConfigurationManagerSettings(
           ImmutableSet.of(_Fields.MESOS),
           false,
-          ImmutableMultimap.of(),
+          ImmutableList.of(),
           true,
           true,
           true,
-          true);
+          true,
+          ConfigurationManager.DEFAULT_ALLOWED_JOB_ENVIRONMENTS);
   public static final ExecutorID EXECUTOR_ID = ExecutorID.newBuilder()
       .setValue("PLACEHOLDER")
       .build();
@@ -114,13 +120,11 @@ public final class TaskTestUtil {
         .setJob(job.newBuilder())
         .setOwner(new Identity().setUser(job.getRole() + "-user"))
         .setIsService(true)
-        .setNumCpus(1.0)
-        .setRamMb(1024)
-        .setDiskMb(1024)
         .setPriority(1)
         .setMaxTaskFailures(-1)
         .setProduction(true)
         .setTier(PROD_TIER_NAME)
+        .setPartitionPolicy(new PartitionPolicy().setDelaySecs(5).setReschedule(true))
         .setConstraints(ImmutableSet.of(
             new Constraint(
                 "valueConstraint",
@@ -129,7 +133,6 @@ public final class TaskTestUtil {
             new Constraint(
                 "limitConstraint",
                 TaskConstraint.limit(new LimitConstraint(5)))))
-        .setRequestedPorts(ImmutableSet.of("http"))
         .setTaskLinks(ImmutableMap.of("http", "link", "admin", "otherLink"))
         .setContactEmail("foo@bar.com")
         .setMetadata(ImmutableSet.of(new Metadata("key", "value")))
@@ -155,7 +158,37 @@ public final class TaskTestUtil {
     return makeTask(id, makeConfig(job));
   }
 
+  public static IScheduledTask makeTask(String id, IJobKey job, int instanceId) {
+    return makeTask(id, makeConfig(job), instanceId, Optional.empty());
+  }
+
+  public static IScheduledTask makeTask(String id, IJobKey job, int instanceId, String agentId) {
+    return makeTask(id, makeConfig(job), instanceId, Optional.of(agentId));
+  }
+
   public static IScheduledTask makeTask(String id, ITaskConfig config) {
+    return makeTask(id, config, 2);
+  }
+
+  public static IScheduledTask makeTask(String id, ITaskConfig config, int instanceId) {
+    return makeTask(id, config, instanceId, Optional.empty());
+  }
+
+  public static IScheduledTask makeTask(
+      String id,
+      ITaskConfig config,
+      int instanceId,
+      Optional<String> agentId) {
+
+    AssignedTask assignedTask = new AssignedTask()
+        .setInstanceId(instanceId)
+        .setTaskId(id)
+        .setAssignedPorts(ImmutableMap.of("http", 1000))
+        .setTask(config.newBuilder());
+    if (agentId.isPresent()) {
+      assignedTask.setSlaveId(agentId.get());
+    }
+
     return IScheduledTask.build(new ScheduledTask()
         .setStatus(ScheduleStatus.ASSIGNED)
         .setTaskEvents(ImmutableList.of(
@@ -167,11 +200,8 @@ public final class TaskTestUtil {
                 .setScheduler("scheduler2")))
         .setAncestorId("ancestor")
         .setFailureCount(3)
-        .setAssignedTask(new AssignedTask()
-            .setInstanceId(2)
-            .setTaskId(id)
-            .setAssignedPorts(ImmutableMap.of("http", 1000))
-            .setTask(config.newBuilder())));
+        .setTimesPartitioned(2)
+        .setAssignedTask(assignedTask));
   }
 
   public static IScheduledTask addStateTransition(
@@ -210,5 +240,13 @@ public final class TaskTestUtil {
         new org.apache.aurora.gen.TierConfig("preemptible", DEV_TIER.toMap()),
         new org.apache.aurora.gen.TierConfig("revocable", REVOCABLE_TIER.toMap())
     );
+  }
+
+  public static ResourceRequest toResourceRequest(ITaskConfig task) {
+    return ResourceRequest.fromTask(
+        task,
+        EXECUTOR_SETTINGS,
+        AttributeAggregate.empty(),
+        TIER_MANAGER);
   }
 }

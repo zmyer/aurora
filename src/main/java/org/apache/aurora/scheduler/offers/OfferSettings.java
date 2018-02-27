@@ -14,7 +14,8 @@
 package org.apache.aurora.scheduler.offers;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Supplier;
+import com.google.common.base.Ticker;
+import com.google.common.cache.CacheBuilder;
 
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
@@ -27,29 +28,45 @@ import static java.util.Objects.requireNonNull;
 @VisibleForTesting
 public class OfferSettings {
 
-  private final Amount<Long, Time> offerFilterDuration;
-  private final Supplier<Amount<Long, Time>> returnDelaySupplier;
+  private final Amount<Long, Time> filterDuration;
+  private final OfferSet offerSet;
+  private final CacheBuilder<Object, Object> staticBanCacheBuilder;
 
-  public OfferSettings(
-      Amount<Long, Time> offerFilterDuration,
-      Supplier<Amount<Long, Time>> returnDelaySupplier) {
+  @VisibleForTesting
+  public OfferSettings(Amount<Long, Time> filterDuration,
+                       OfferSet offerSet,
+                       Amount<Long, Time> maxHoldTime,
+                       long staticBanCacheMaxSize,
+                       Ticker staticBanTicker) {
 
-    this.offerFilterDuration = requireNonNull(offerFilterDuration);
-    this.returnDelaySupplier = requireNonNull(returnDelaySupplier);
+    this.filterDuration = requireNonNull(filterDuration);
+    this.offerSet = requireNonNull(offerSet);
+    this.staticBanCacheBuilder = CacheBuilder.newBuilder()
+        .expireAfterWrite(maxHoldTime.as(Time.SECONDS), Time.SECONDS.getTimeUnit())
+        .maximumSize(staticBanCacheMaxSize)
+        .ticker(staticBanTicker)
+        .recordStats();
   }
 
   /**
    * Duration after which we want Mesos to re-offer unused or declined resources.
    */
-  public Amount<Long, Time> getOfferFilterDuration() {
-    return offerFilterDuration;
+  Amount<Long, Time> getFilterDuration() {
+    return filterDuration;
   }
 
   /**
-   * The amount of time after which an unused offer should be 'returned' to Mesos by declining it.
-   * The delay is calculated for each offer using a random duration within a fixed window.
+   * The factory to create the {@link OfferSet} implementation.
    */
-  public Amount<Long, Time> getOfferReturnDelay() {
-    return returnDelaySupplier.get();
+  OfferSet getOfferSet() {
+    return offerSet;
+  }
+
+  /**
+   * The builder for the static ban cache. Cache settings (e.g. max size, entry expiration) should
+   * already be added to the builder by this point.
+   */
+  CacheBuilder<Object, Object> getStaticBanCacheBuilder() {
+    return staticBanCacheBuilder;
   }
 }

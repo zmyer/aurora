@@ -14,10 +14,10 @@
 package org.apache.aurora.scheduler.preemptor;
 
 import java.util.Iterator;
+import java.util.Optional;
 
 import javax.inject.Inject;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.aurora.scheduler.base.TaskGroupKey;
@@ -26,7 +26,7 @@ import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.Storage.MutableStoreProvider;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
-import org.apache.mesos.Protos.SlaveID;
+import org.apache.mesos.v1.Protos.AgentID;
 
 import static java.util.Objects.requireNonNull;
 
@@ -88,13 +88,13 @@ public interface Preemptor {
         slotCache.remove(slot, groupKey);
 
         // Validate PreemptionProposal is still valid for the given task.
-        SlaveID slaveId = SlaveID.newBuilder().setValue(slot.getSlaveId()).build();
+        AgentID slaveId = AgentID.newBuilder().setValue(slot.getSlaveId()).build();
         Optional<ImmutableSet<PreemptionVictim>> validatedVictims =
             preemptionVictimFilter.filterPreemptionVictims(
                 pendingTask.getTask(),
                 slot.getVictims(),
                 jobState,
-                offerManager.getOffer(slaveId),
+                offerManager.get(slaveId),
                 store);
 
         metrics.recordSlotValidationResult(validatedVictims);
@@ -104,7 +104,7 @@ public interface Preemptor {
             stateManager.changeState(
                 store,
                 toPreempt.getTaskId(),
-                Optional.absent(),
+                Optional.empty(),
                 PREEMPTING,
                 Optional.of("Preempting in favor of " + pendingTask.getTaskId()));
           }
@@ -112,7 +112,7 @@ public interface Preemptor {
         }
       }
 
-      return Optional.absent();
+      return Optional.empty();
     }
   }
 }

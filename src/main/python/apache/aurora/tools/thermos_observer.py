@@ -14,17 +14,16 @@
 
 """A Mesos-customized entry point to the thermos_observer webserver."""
 
-import sys
-import thread
-import threading
 import time
 
-from twitter.common import app, log
+from twitter.common import app
 from twitter.common.exceptions import ExceptionalThread
 from twitter.common.log.options import LogOptions
 from twitter.common.quantity import Amount, Time
 
 from apache.aurora.executor.common.path_detector import MesosPathDetector
+from apache.thermos.common.excepthook import ExceptionTerminationHandler
+from apache.thermos.monitoring.resource import TaskResourceMonitor
 from apache.thermos.observer.http.configure import configure_server
 from apache.thermos.observer.task_observer import TaskObserver
 
@@ -60,6 +59,22 @@ app.add_option(
       help='The number of seconds between observer refresh attempts.')
 
 
+app.add_option(
+    '--task_process_collection_interval_secs',
+      dest='task_process_collection_interval_secs',
+      type='int',
+      default=int(TaskResourceMonitor.PROCESS_COLLECTION_INTERVAL.as_(Time.SECONDS)),
+      help='The number of seconds between per task process resource collections.')
+
+
+app.add_option(
+    '--task_disk_collection_interval_secs',
+      dest='task_disk_collection_interval_secs',
+      type='int',
+      default=int(TaskResourceMonitor.DISK_COLLECTION_INTERVAL.as_(Time.SECONDS)),
+      help='The number of seconds between per task disk resource collections.')
+
+
 # Allow an interruptible sleep so that ^C works.
 def sleep_forever():
   while True:
@@ -68,20 +83,11 @@ def sleep_forever():
 
 def initialize(options):
   path_detector = MesosPathDetector(options.mesos_root)
-  polling_interval = Amount(options.polling_interval_secs, Time.SECONDS)
-  return TaskObserver(path_detector, interval=polling_interval)
-
-
-def handle_error(exc_type, value, traceback):
-  """ Tear down the observer in case of unhandled errors.
-
-  By using ExceptionalThread throughout the observer we have ensured that sys.excepthook will
-  be called for every unhandled exception, even for those not originating in the main thread.
-  """
-  log.error("An unhandled error occured. Tearing down.", exc_info=(exc_type, value, traceback))
-  # TODO: In Python 3.4 we will be able to use threading.main_thread()
-  if not isinstance(threading.current_thread(), threading._MainThread):
-    thread.interrupt_main()
+  return TaskObserver(
+      path_detector,
+      Amount(options.polling_interval_secs, Time.SECONDS),
+      Amount(options.task_process_collection_interval_secs, Time.SECONDS),
+      Amount(options.task_disk_collection_interval_secs, Time.SECONDS))
 
 
 def main(_, options):
@@ -96,6 +102,6 @@ def main(_, options):
   sleep_forever()
 
 
-sys.excepthook = handle_error
 LogOptions.set_stderr_log_level('google:INFO')
+app.register_module(ExceptionTerminationHandler())
 app.main()

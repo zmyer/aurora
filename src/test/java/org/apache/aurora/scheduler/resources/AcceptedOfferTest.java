@@ -14,17 +14,17 @@
 package org.apache.aurora.scheduler.resources;
 
 import java.util.Collections;
+import java.util.Optional;
 import java.util.Set;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.aurora.gen.AssignedTask;
 import org.apache.aurora.gen.TaskConfig;
-import org.apache.aurora.scheduler.TierInfo;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
-import org.apache.mesos.Protos;
-import org.apache.mesos.Protos.Resource;
+import org.apache.mesos.v1.Protos;
+import org.apache.mesos.v1.Protos.Resource;
+import org.junit.Before;
 import org.junit.Test;
 
 import static org.apache.aurora.scheduler.base.TaskTestUtil.DEV_TIER;
@@ -45,12 +45,17 @@ import static org.junit.Assert.assertTrue;
 
 public class AcceptedOfferTest {
   private static final Optional<String> TEST_ROLE = Optional.of("test-role");
-  private static final Optional<String> ABSENT_ROLE = Optional.absent();
+  private static final Optional<String> ABSENT_ROLE = Optional.empty();
   private static final IAssignedTask TASK = makeTask("id", JOB).getAssignedTask();
   private static final ResourceBag EXECUTOR_BAG = bag(0.25, 25, 75);
   private static final ResourceBag TOTAL_BAG =
       EXECUTOR_BAG.add(bagFromResources(TASK.getTask().getResources()));
   private static final Integer[] TASK_PORTS = {TASK.getAssignedPorts().get("http")};
+
+  @Before
+  public void setUp() {
+    ResourceType.initializeEmptyCliArgsForTest();
+  }
 
   @Test
   public void testReservedPredicates() {
@@ -68,7 +73,7 @@ public class AcceptedOfferTest {
         offer(),
         IAssignedTask.build(new AssignedTask().setTask(new TaskConfig())),
         ResourceBag.EMPTY,
-        DEV_TIER);
+        DEV_TIER.isRevocable());
     assertEquals(Collections.emptyList(), acceptedOffer.getTaskResources());
     assertEquals(Collections.emptyList(), acceptedOffer.getExecutorResources());
   }
@@ -88,8 +93,7 @@ public class AcceptedOfferTest {
         mesosScalar(DISK_MB, TOTAL_BAG.valueOf(DISK_MB), false),
         mesosRange(PORTS, role, TASK_PORTS));
 
-    AcceptedOffer offerAllocation = AcceptedOffer.create(
-        offer, TASK, EXECUTOR_BAG, new TierInfo(false, revocable));
+    AcceptedOffer offerAllocation = AcceptedOffer.create(offer, TASK, EXECUTOR_BAG, revocable);
 
     ResourceBag bag = bagFromResources(TASK.getTask().getResources());
     Set<Resource> taskResources = ImmutableSet.<Resource>builder()
@@ -126,8 +130,7 @@ public class AcceptedOfferTest {
         mesosScalar(DISK_MB, TEST_ROLE, false, TOTAL_BAG.valueOf(DISK_MB)),
         mesosRange(PORTS, TEST_ROLE, TASK_PORTS));
 
-    AcceptedOffer offerAllocation = AcceptedOffer.create(
-        offer, TASK, EXECUTOR_BAG, new TierInfo(false, revocable));
+    AcceptedOffer offerAllocation = AcceptedOffer.create(offer, TASK, EXECUTOR_BAG, revocable);
 
     Set<Resource> taskSet = ImmutableSet.<Resource>builder()
         .add(mesosScalar(CPUS, TEST_ROLE, revocable, EXECUTOR_BAG.valueOf(CPUS)))

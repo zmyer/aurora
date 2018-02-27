@@ -84,7 +84,6 @@ public class SchedulerLifecycleTest extends EasyMockTest {
         shutdownRegistry,
         statsProvider,
         serviceManager);
-    assertEquals(0, statsProvider.getValue(SchedulerLifecycle.REGISTERED_GAUGE));
     assertEquals(1, statsProvider.getValue(stateGaugeName(State.IDLE)));
     return shutdownCommand;
   }
@@ -107,8 +106,14 @@ public class SchedulerLifecycleTest extends EasyMockTest {
     serviceManager.awaitHealthy();
   }
 
-  private void expectShutdown() throws Exception {
+  private void expectLeaderShutdown() throws Exception {
     leaderControl.leave();
+    expectShutdown();
+  }
+
+  private void expectShutdown() throws Exception {
+    // Shutdown before leadership is taken (ex. in prepare).
+
     expect(driver.stopAsync()).andReturn(driver);
     driver.awaitTerminated();
     storageUtil.storage.stop();
@@ -129,7 +134,7 @@ public class SchedulerLifecycleTest extends EasyMockTest {
     expectInitializeDriver();
 
     expectFullStartup();
-    expectShutdown();
+    expectLeaderShutdown();
 
     replayAndCreateLifecycle();
 
@@ -137,10 +142,8 @@ public class SchedulerLifecycleTest extends EasyMockTest {
     assertEquals(1, statsProvider.getValue(stateGaugeName(State.STORAGE_PREPARED)));
     leaderListener.onLeading(leaderControl);
     assertEquals(1, statsProvider.getValue(stateGaugeName(State.LEADER_AWAITING_REGISTRATION)));
-    assertEquals(0, statsProvider.getValue(SchedulerLifecycle.REGISTERED_GAUGE));
     schedulerLifecycle.registered(new DriverRegistered());
     assertEquals(1, statsProvider.getValue(stateGaugeName(State.ACTIVE)));
-    assertEquals(1, statsProvider.getValue(SchedulerLifecycle.REGISTERED_GAUGE));
     triggerFailover.getValue().run();
   }
 
@@ -154,7 +157,7 @@ public class SchedulerLifecycleTest extends EasyMockTest {
     expect(driver.startAsync()).andReturn(driver);
     driver.awaitRunning();
 
-    expectShutdown();
+    expectLeaderShutdown();
 
     replayAndCreateLifecycle();
 
@@ -173,7 +176,7 @@ public class SchedulerLifecycleTest extends EasyMockTest {
     driver.awaitRunning();
 
     // Important piece here is what's absent - leader presence is not advertised.
-    expectShutdown();
+    expectLeaderShutdown();
 
     replayAndCreateLifecycle();
 
@@ -183,12 +186,28 @@ public class SchedulerLifecycleTest extends EasyMockTest {
   }
 
   @Test
+  public void testStoragePrepareFails() throws Exception {
+    storageUtil.storage.prepare();
+    expectLastCall().andThrow(new StorageException("Prepare failed."));
+    expectShutdown();
+
+    replayAndCreateLifecycle();
+
+    try {
+      schedulerLifecycle.prepare();
+      fail();
+    } catch (StorageException e) {
+      // Expected.
+    }
+  }
+
+  @Test
   public void testStorageStartFails() throws Exception {
     storageUtil.storage.prepare();
     storageUtil.expectOperations();
     storageUtil.storage.start(EasyMock.anyObject());
     expectLastCall().andThrow(new StorageException("Recovery failed."));
-    expectShutdown();
+    expectLeaderShutdown();
 
     replayAndCreateLifecycle();
 
@@ -212,7 +231,7 @@ public class SchedulerLifecycleTest extends EasyMockTest {
     expectInitializeDriver();
 
     expectFullStartup();
-    expectShutdown();
+    expectLeaderShutdown();
     expect(serviceManager.stopAsync()).andReturn(serviceManager);
     serviceManager.awaitStopped(5, TimeUnit.SECONDS);
 

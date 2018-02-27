@@ -13,7 +13,9 @@
  */
 package org.apache.aurora.scheduler.storage.backup;
 
+import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -23,18 +25,19 @@ import javax.inject.Inject;
 
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.io.Files;
 import com.google.common.util.concurrent.Atomics;
 
-import org.apache.aurora.codec.ThriftBinaryCodec;
 import org.apache.aurora.codec.ThriftBinaryCodec.CodingException;
 import org.apache.aurora.common.base.Command;
 import org.apache.aurora.gen.storage.Snapshot;
 import org.apache.aurora.scheduler.base.Query;
-import org.apache.aurora.scheduler.storage.DistributedSnapshotStore;
+import org.apache.aurora.scheduler.storage.SnapshotStore;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
+import org.apache.thrift.TException;
+import org.apache.thrift.protocol.TBinaryProtocol;
+import org.apache.thrift.transport.TIOStreamTransport;
 
 import static java.util.Objects.requireNonNull;
 
@@ -107,7 +110,7 @@ public interface Recovery {
     private final Function<Snapshot, TemporaryStorage> tempStorageFactory;
     private final AtomicReference<PendingRecovery> recovery;
     private final Storage primaryStorage;
-    private final DistributedSnapshotStore distributedStore;
+    private final SnapshotStore snapshotStore;
     private final Command shutDownNow;
 
     @Inject
@@ -115,14 +118,14 @@ public interface Recovery {
         File backupDir,
         Function<Snapshot, TemporaryStorage> tempStorageFactory,
         Storage primaryStorage,
-        DistributedSnapshotStore distributedStore,
+        SnapshotStore snapshotStore,
         Command shutDownNow) {
 
       this.backupDir = requireNonNull(backupDir);
       this.tempStorageFactory = requireNonNull(tempStorageFactory);
       this.recovery = Atomics.newReference();
       this.primaryStorage = requireNonNull(primaryStorage);
-      this.distributedStore = requireNonNull(distributedStore);
+      this.snapshotStore = requireNonNull(snapshotStore);
       this.shutDownNow = requireNonNull(shutDownNow);
     }
 
@@ -133,19 +136,7 @@ public interface Recovery {
 
     @Override
     public void stage(String backupName) throws RecoveryException {
-      File backupFile = new File(backupDir, backupName);
-      if (!backupFile.exists()) {
-        throw new RecoveryException("Backup " + backupName + " does not exist.");
-      }
-
-      Snapshot snapshot;
-      try {
-        snapshot = ThriftBinaryCodec.decode(Snapshot.class, Files.toByteArray(backupFile));
-      } catch (CodingException e) {
-        throw new RecoveryException("Failed to decode backup " + e, e);
-      } catch (IOException e) {
-        throw new RecoveryException("Failed to read backup " + e, e);
-      }
+      Snapshot snapshot = load(new File(backupDir, backupName));
       boolean applied =
           recovery.compareAndSet(null, new PendingRecovery(tempStorageFactory.apply(snapshot)));
       if (!applied) {
@@ -191,7 +182,7 @@ public interface Recovery {
       void commit() {
         primaryStorage.write((NoResult.Quiet) storeProvider -> {
           try {
-            distributedStore.persist(tempStorage.toSnapshot());
+            snapshotStore.snapshotWith(tempStorage.toSnapshot());
             shutDownNow.execute();
           } catch (CodingException e) {
             throw new IllegalStateException("Failed to encode snapshot.", e);
@@ -206,6 +197,24 @@ public interface Recovery {
       void delete(final Query.Builder query) {
         tempStorage.deleteTasks(query);
       }
+    }
+  }
+
+  static Snapshot load(File backupFile) throws RecoveryException {
+    if (!backupFile.exists()) {
+      throw new RecoveryException("Backup " + backupFile + " does not exist.");
+    }
+
+    try {
+      Snapshot snapshot = new Snapshot();
+      TBinaryProtocol prot = new TBinaryProtocol(
+          new TIOStreamTransport(new BufferedInputStream(new FileInputStream(backupFile))));
+      snapshot.read(prot);
+      return snapshot;
+    } catch (TException e) {
+      throw new RecoveryException("Failed to decode backup " + e, e);
+    } catch (IOException e) {
+      throw new RecoveryException("Failed to read backup " + e, e);
     }
   }
 }

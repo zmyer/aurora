@@ -11,19 +11,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import org.apache.aurora.build.CoverageReportCheck
-import org.gradle.api.JavaVersion
-
 plugins {
   id 'com.eriwen.gradle.js' version '1.12.1'
   id 'com.github.ben-manes.versions' version '0.11.3'
   id 'com.github.hierynomus.license' version '0.11.0'
-  id 'me.champeau.gradle.jmh' version '0.2.0'
+  id 'com.moowork.node' version '1.2.0'
+  id 'me.champeau.gradle.jmh' version '0.4.4'
+  id "com.github.spotbugs" version "1.6.0"
 }
 
 apply plugin: 'application'
 apply plugin: 'checkstyle'
-apply plugin: 'findbugs'
 apply plugin: 'jacoco'
 apply plugin: 'pmd'
 
@@ -80,81 +78,110 @@ For more details, please see https://issues.apache.org/jira/browse/AURORA-1169
   }
 
   ext.commonsLangRev = '2.6'
-  ext.curatorRev = '2.11.1'
+  ext.curatorRev = '2.12.0'
   ext.gsonRev = '2.3.1'
-  ext.guavaRev = '20.0'
-  ext.guiceRev = '3.0'
+  ext.guavaRev = '23.2-jre'
+  ext.guiceRev = '4.1.0'
   ext.httpclientRev = '4.5.2'
   ext.httpcoreRev = '4.4.4'
+  ext.asyncHttpclientRev = '2.0.37'
   ext.jacksonRev = '2.5.1'
-  ext.jerseyRev = '1.19'
-  ext.jsrRev = '3.0.1'
+  ext.jaxRsRev = '2.0'
   ext.junitRev = '4.12'
-  ext.logbackRev = '1.1.3'
-  ext.mybatisRev = '3.4.1'
-  ext.protobufRev = '2.6.1'
+  ext.logbackRev = '1.2.3'
+  ext.nettyRev = '4.0.52.Final'
+  ext.protobufRev = '3.3.0'
+  ext.resteasyRev = '3.1.4.Final'
   ext.servletRev = '3.1.0'
-  ext.slf4jRev = '1.7.12'
+  ext.slf4jRev = '1.7.25'
   ext.stringTemplateRev = '3.2.1'
-  ext.thriftRev = '0.9.1'
+  ext.thriftRev = '0.10.0'
   ext.zookeeperRev = '3.4.8'
 
-  configurations {
-    compile {
-      exclude module: 'junit-dep'
-      // We use logback, so we do not want to pull in log4j artifacts.
-      exclude module: 'log4j'
-      exclude module: 'slf4j-log4j12'
+  configurations.all {
+    exclude module: 'junit-dep'
+    // We use logback, so we do not want to pull in log4j artifacts.
+    exclude module: 'log4j'
+    exclude module: 'slf4j-log4j12'
 
-      // ResolutionStrategy needs to be set in the allprojects block otherwise dependent projects
-      // will not inherit it. Note that dependencies still need to be specified in a dependencies
-      // block - this only affects strategy.
-      // See http://forums.gradle.org/gradle/topics/shouldnt-resolutionstrategy-affect-depending-projects-transitive-dependencies
-      resolutionStrategy {
-        failOnVersionConflict()
-        force "org.apache.httpcomponents:httpclient:${httpclientRev}"
-        force "org.apache.httpcomponents:httpcore:${httpcoreRev}"
-        force "com.fasterxml.jackson.core:jackson-annotations:${jacksonRev}"
-        force "com.fasterxml.jackson.core:jackson-core:${jacksonRev}"
-        force "com.google.code.gson:gson:${gsonRev}"
-        force "com.google.guava:guava:${guavaRev}"
-        force "com.google.protobuf:protobuf-java:${protobufRev}"
-        force "junit:junit:${junitRev}"
-        force "org.apache.thrift:libthrift:${thriftRev}"
-        force "org.apache.zookeeper:zookeeper:${zookeeperRev}"
-        force "org.hamcrest:hamcrest-core:1.3"
-        force "org.slf4j:slf4j-api:${slf4jRev}"
-        force "org.mybatis:mybatis:${mybatisRev}"
-      }
+    // ResolutionStrategy needs to be set in the allprojects block otherwise dependent projects
+    // will not inherit it. Note that dependencies still need to be specified in a dependencies
+    // block - this only affects strategy.
+    // See http://forums.gradle.org/gradle/topics/shouldnt-resolutionstrategy-affect-depending-projects-transitive-dependencies
+    resolutionStrategy {
+      failOnVersionConflict()
+      force "com.google.inject:guice:${guiceRev}"
+      force "com.google.inject.extensions:guice-multibindings:${guiceRev}"
+      force "org.apache.httpcomponents:httpclient:${httpclientRev}"
+      force "org.apache.httpcomponents:httpcore:${httpcoreRev}"
+      force "com.fasterxml.jackson.core:jackson-annotations:${jacksonRev}"
+      force "com.fasterxml.jackson.core:jackson-core:${jacksonRev}"
+      force "com.google.code.gson:gson:${gsonRev}"
+      force "com.google.guava:guava:${guavaRev}"
+      force "com.google.protobuf:protobuf-java:${protobufRev}"
+      force "io.netty:netty-handler:${nettyRev}"
+      force "junit:junit:${junitRev}"
+      force "org.apache.thrift:libthrift:${thriftRev}"
+      force "org.apache.zookeeper:zookeeper:${zookeeperRev}"
+      force "org.hamcrest:hamcrest-core:1.3"
+      force 'org.objenesis:objenesis:2.2'
+      force "org.slf4j:slf4j-api:${slf4jRev}"
     }
   }
 }
 
-/* This gradle project contains the annotation procesor from
- * com.twitter.common.args and related dependencies. It needs to be outside of
- * the commons project because gradle needs to compile the annotation processor
- * first.
+/**
+ * This gradle project contains the logic to bootstrap and build the UI bundle using NodeJS.
+ * The core logic of UI building is delegated to npm and Webpack. Webpack writes the UI bundle
+ * into the resources directory of the Scheduler, so it must be built before the Scheduler.
  */
-project(':commons-args') {
-  dependencies {
-    compile "com.google.guava:guava:${guavaRev}"
-    compile "com.google.code.findbugs:jsr305:${jsrRev}"
-    compile "commons-lang:commons-lang:${commonsLangRev}"
+project(':ui') {
+  apply plugin: 'com.moowork.node'
+  node {
+    download = true
   }
 
-  apply plugin: 'license'
-  license {
-    header rootProject.file('config/checkstyle/apache.header')
-    strictCheck true
+  task test(type: NpmTask, overwrite: true) {
+    inputs.files(fileTree('src'), fileTree('plugin'))
+    outputs.files(fileTree('dist'))
+    args = ['test']
   }
+
+  task pluginInstall(type: NpmTask) {
+    inputs.files(file('plugin/package.json'))
+    outputs.files(fileTree('node_modules'))
+
+    args = ['install', 'plugin/']
+  }
+
+  task install(type: NpmTask, dependsOn: 'pluginInstall') {
+    inputs.files(file('package.json'))
+    outputs.files(fileTree('node_modules'))
+    // Install into the project dir to sandbox everything under ui/
+    args = ['install']
+  }
+
+  task lint(type: NpmTask, dependsOn: 'install') {
+    inputs.files(fileTree('src'), fileTree('plugin'))
+    outputs.files(fileTree('.'))
+    args = ['run', 'lint']
+  }
+
+  task webpack(type: NodeTask, dependsOn: 'install') {
+    inputs.files(fileTree('src'), fileTree('plugin'))
+    outputs.files(sourceSets.main.java)
+    script = file('node_modules/.bin/webpack')
+  }
+
+  tasks.build.dependsOn(lint)
+  tasks.build.dependsOn(webpack)
+  tasks.build.dependsOn(npm_test)
 }
+// Make sure UI webpack is run as part of 'processResources --continuous'. Also makes sure when
+// building the Scheduler JAR, the JS bundle is built first.
+tasks.processResources.dependsOn(':ui:webpack')
 
 project(':commons') {
-  apply plugin: org.apache.aurora.build.ThriftPlugin
-  thrift {
-    version = thriftRev
-  }
-
   apply plugin: 'license'
   license {
     header rootProject.file('config/checkstyle/apache.header')
@@ -162,17 +189,12 @@ project(':commons') {
   }
 
   dependencies {
-    compile project(':commons-args')
-
-    compile "com.google.code.findbugs:jsr305:${jsrRev}"
     compile "com.google.code.gson:gson:${gsonRev}"
     compile "com.google.guava:guava:${guavaRev}"
-    compile "com.google.inject.extensions:guice-multibindings:${guiceRev}"
     compile "com.google.inject:guice:${guiceRev}"
-    compile "com.sun.jersey:jersey-core:${jerseyRev}"
     compile "commons-lang:commons-lang:${commonsLangRev}"
     compile "javax.servlet:javax.servlet-api:${servletRev}"
-    compile "joda-time:joda-time:2.9.1"
+    compile "javax.ws.rs:javax.ws.rs-api:${jaxRsRev}"
     compile "org.antlr:stringtemplate:${stringTemplateRev}"
     compile "org.apache.zookeeper:zookeeper:${zookeeperRev}"
     compile "org.easymock:easymock:3.4"
@@ -183,8 +205,6 @@ project(':commons') {
     compile "junit:junit:${junitRev}"
 
     testCompile "junit:junit:${junitRev}"
-    testCompile "org.powermock:powermock-module-junit4:1.6.4"
-    testCompile "org.powermock:powermock-api-easymock:1.6.4"
   }
 }
 
@@ -192,20 +212,22 @@ project(':api') {
   apply plugin: org.apache.aurora.build.ThriftPlugin
   apply plugin: org.apache.aurora.build.ThriftEntitiesPlugin
 
-  task checkPython << {
-    def python27Executable = ['python2.7', 'python'].find { python ->
-      try {
-        def check = "import sys; sys.exit(0 if sys.version_info >= (2,7) and sys.version_info < (3,) else 1)"
-        return [python, "-c", check].execute().waitFor() == 0
-      } catch (IOException e) {
-        return false
+  task checkPython {
+    doLast {
+      def python27Executable = ['python2.7', 'python'].find { python ->
+        try {
+          def check = "import sys; sys.exit(0 if sys.version_info >= (2,7) and sys.version_info < (3,) else 1)"
+          return [python, "-c", check].execute().waitFor() == 0
+        } catch (IOException e) {
+          return false
+        }
       }
-    }
 
-    if (python27Executable == null) {
-      throw new GradleException('Build requires Python 2.7.')
-    } else {
-      thriftEntities.python = python27Executable
+      if (python27Executable == null) {
+        throw new GradleException('Build requires Python 2.7.')
+      } else {
+        thriftEntities.python = python27Executable
+      }
     }
   }
   generateThriftEntitiesJava.dependsOn checkPython
@@ -343,36 +365,33 @@ sourceSets {
 }
 
 dependencies {
-  def shiroRev = '1.2.4'
+  def shiroRev = '1.4.0'
   def jettyDep = '9.3.11.v20160721'
 
   compile project(':api')
   compile project(':commons')
-  compile project(':commons-args')
 
   compile 'aopalliance:aopalliance:1.0'
-  compile 'ch.qos.logback:logback-classic:1.1.3'
-  compile "com.google.code.findbugs:jsr305:${jsrRev}"
+  compile "ch.qos.logback:logback-classic:${logbackRev}"
+  compile "com.beust:jcommander:1.72"
   compile "com.google.inject:guice:${guiceRev}"
   compile "com.google.inject.extensions:guice-assistedinject:${guiceRev}"
+  compile "com.google.inject.extensions:guice-multibindings:${guiceRev}"
+  compile "com.google.inject.extensions:guice-servlet:${guiceRev}"
   compile "com.google.protobuf:protobuf-java:${protobufRev}"
-  compile 'com.h2database:h2:1.4.193'
   compile 'com.hubspot.jackson:jackson-datatype-protobuf:0.9.3'
   compile "com.fasterxml.jackson.core:jackson-core:${jacksonRev}"
-  compile "com.sun.jersey:jersey-core:${jerseyRev}"
-  compile "com.sun.jersey:jersey-json:${jerseyRev}"
-  compile "com.sun.jersey:jersey-server:${jerseyRev}"
-  compile "com.sun.jersey:jersey-servlet:${jerseyRev}"
-  compile "com.sun.jersey.contribs:jersey-guice:${jerseyRev}"
+  compile "org.jboss.resteasy:resteasy-guice:${resteasyRev}"
+  compile "org.jboss.resteasy:resteasy-jackson-provider:${resteasyRev}"
+  compile "org.jboss.resteasy:resteasy-jaxrs:${resteasyRev}"
   compile 'javax.inject:javax.inject:1'
   compile "javax.servlet:javax.servlet-api:${servletRev}"
   compile "org.antlr:stringtemplate:${stringTemplateRev}"
   compile "org.apache.curator:curator-client:${curatorRev}"
   compile "org.apache.curator:curator-framework:${curatorRev}"
   compile "org.apache.curator:curator-recipes:${curatorRev}"
-  compile 'org.apache.mesos:mesos:1.1.0'
-  compile "org.apache.httpcomponents:httpclient:${httpclientRev}"
-  compile "org.apache.httpcomponents:httpcore:${httpcoreRev}"
+  compile 'org.apache.mesos:mesos:1.4.0'
+  compile "org.asynchttpclient:async-http-client:${asyncHttpclientRev}"
   compile "org.apache.shiro:shiro-guice:${shiroRev}"
   compile "org.apache.shiro:shiro-web:${shiroRev}"
   compile "org.apache.zookeeper:zookeeper:${zookeeperRev}"
@@ -380,13 +399,9 @@ dependencies {
   compile "org.eclipse.jetty:jetty-server:${jettyDep}"
   compile "org.eclipse.jetty:jetty-servlet:${jettyDep}"
   compile "org.eclipse.jetty:jetty-servlets:${jettyDep}"
-  compile "org.mybatis:mybatis:${mybatisRev}"
-  compile 'org.mybatis:mybatis-guice:3.7'
-  compile 'org.mybatis:mybatis-migrations:3.2.0'
   compile 'org.quartz-scheduler:quartz:2.2.2'
-  compile "uno.perk:forward:1.0.0"
 
-  testCompile "com.sun.jersey:jersey-client:${jerseyRev}"
+  testCompile 'com.sun.jersey:jersey-client:1.19'
   testCompile "junit:junit:${junitRev}"
   testCompile "org.powermock:powermock-module-junit4:1.6.4"
   testCompile "org.powermock:powermock-api-easymock:1.6.4"
@@ -398,7 +413,7 @@ dependencies {
 def runCodeQuality = project.hasProperty('q')
 def codeQualityTasks = [
     Checkstyle,
-    FindBugs,
+    com.github.spotbugs.SpotBugsTask,
     nl.javadude.gradle.plugins.license.License,
     Pmd
 ]
@@ -413,22 +428,22 @@ checkstyle {
   toolVersion = '7.3'
 }
 
-findbugs {
-  toolVersion = '3.0.1'
+spotbugs {
+  toolVersion = '3.1.0'
   effort = "max"
 }
 
-tasks.withType(FindBugs) {
+tasks.withType(com.github.spotbugs.SpotBugsTask) {
   reports {
     xml.enabled = false
     html.enabled = true
   }
   maxHeapSize = '1g'
-  excludeFilter = rootProject.file('config/findbugs/excludeFilter.xml')
+  excludeFilter = rootProject.file('config/spotbugs/excludeFilter.xml')
 }
 
 pmd {
-  toolVersion = '5.5.2'
+  toolVersion = '5.5.3'
   consoleOutput = true
 }
 
@@ -447,52 +462,9 @@ pmdTest {
   ruleSetFiles = files('config/pmd/common.xml', 'config/pmd/test.xml')
 }
 
-/**
- * There is a jshint target recommended in the README for gradle-js-plugin
- * but it does not work. This workaround from here:
- * https://github.com/eriwen/gradle-js-plugin/issues/73
- */
-task jsHint(type:com.eriwen.gradle.js.tasks.JsHintTask) {
-  source = fileTree("src/main/resources/$httpAssetsPath/js/")
-  dest file("${buildDir}/jshint.out")
-  // Set this to false once JS code complies with JSHint.
-  ignoreExitCode false
-  outputToStdOut true
-  jshint.options = [
-    // See: http://www.jshint.com/docs/options/ for explanation.
-    browser: true,
-    camelcase: true,
-    curly: true,
-    eqeqeq: true,
-    indent: 2,
-    maxlen: 100,
-    quotmark: true,
-    trailing: true,
-    undef: true,
-    unused: 'vars',
-    white: true
-  ]
-  jshint.predef = [
-    '_': true,
-    'angular': true,
-    'moment': true,
-    'Thrift': true
-  ]
-}
-tasks.checkstyleMain.dependsOn(jsHint)
-
 tasks.withType(Test) {
   maxParallelForks = Runtime.runtime.availableProcessors()
 }
-
-// Turn on annotation processors for commons (uses commons-args) and aurora
-// (uses commons-args, forward, ...).  The crux here is _not_ turning annotation processing on
-// for commons-args (this leads to an attempt at self-processing before its processor is
-// compiled); so the strategy taken is to white-list modules.
-//
-// NB: Unfortunately, most of the ipr/iml modeling we need is not exposed by the idea plugin DSL so
-// we drop to xml manipulation here only out of necessity.
-def apt_projects = ['commons', 'aurora']
 
 idea {
   project {
@@ -503,6 +475,9 @@ idea {
     ipr {
       withXml {
         def projectNode = it.asNode()
+
+        // TODO(wfarner): Does the below work?  It still seems necessary to manually turn on
+        // annotation processing.
 
         // Configure an annotation processor profile.
         def compilerConfiguration = projectNode.find {
@@ -517,9 +492,7 @@ idea {
               sourceOutputDir(name: 'generated')
               sourceTestOutputDir(name: 'generated')
               processorPath(useClasspath: 'true')
-              apt_projects.each {
-                module(name: it)
-              }
+              module(name: 'aurora')
             }
           }
         }
@@ -527,11 +500,6 @@ idea {
           it.name() == 'component' && it.@name == 'ProjectRootManager'
         }
         projectRoot.remove(projectRoot.output)
-
-        // Add parameter names to generated class file debug info.
-        projectNode
-            .appendNode('component', [name: 'JavacSettings'])
-            .appendNode('option', [name: 'ADDITIONAL_OPTIONS_STRING', value: '-parameters'])
       }
     }
   }
@@ -541,21 +509,18 @@ idea {
 // generated code output dirs as source (and test) dirs.  The key difficulty being worked around
 // here is the fact that excludes higher in a directory tree override includes deeper in the tree.
 allprojects {
-  def isApt = it.name in apt_projects
   def generatedSourceDir = file("${it.projectDir}/out/production/generated")
   def generatedTestDir = file("${it.projectDir}/out/test/generated")
 
   idea {
     module {
-      if (isApt) {
-        generatedSourceDir.exists() || generatedSourceDir.mkdirs()
-        sourceDirs += generatedSourceDir
-        generatedSourceDirs += generatedSourceDir
+      generatedSourceDir.exists() || generatedSourceDir.mkdirs()
+      sourceDirs += generatedSourceDir
+      generatedSourceDirs += generatedSourceDir
 
-        generatedTestDir.exists() || generatedTestDir.mkdirs()
-        testSourceDirs += generatedTestDir
-        generatedSourceDirs += generatedTestDir
-      }
+      generatedTestDir.exists() || generatedTestDir.mkdirs()
+      testSourceDirs += generatedTestDir
+      generatedSourceDirs += generatedTestDir
 
       iml {
         withXml {
@@ -567,11 +532,9 @@ allprojects {
           moduleConfiguration.appendNode('output', [url: 'file://$MODULE_DIR$/out/production'])
           moduleConfiguration.appendNode('output-test', [url: 'file://$MODULE_DIR$/out/test'])
 
-          if (isApt) {
-            def excludeOutput = moduleConfiguration.find { it.name() == 'exclude-output' }
-            if (excludeOutput) {
-              moduleConfiguration.remove(excludeOutput)
-            }
+          def excludeOutput = moduleConfiguration.find { it.name() == 'exclude-output' }
+          if (excludeOutput) {
+            moduleConfiguration.remove(excludeOutput)
           }
         }
       }
@@ -610,13 +573,23 @@ jacocoTestReport {
 }
 test.finalizedBy jacocoTestReport
 
-task analyzeReport(type: CoverageReportCheck) {
-  coverageReportFile = "$reportPath/jacocoTestReport.xml"
-  minInstructionCoverage = 0.89
-  minBranchCoverage = 0.835
-  legacyClassesWithoutCoverage = file('config/legacy_untested_classes.txt').readLines()
+jacocoTestCoverageVerification {
+  violationRules {
+    rule {
+      limit {
+        counter = 'INSTRUCTION'
+        minimum = 0.87
+      }
+    }
+    rule {
+      limit {
+        counter = 'BRANCH'
+        minimum = 0.79
+      }
+    }
+  }
 }
-jacocoTestReport.finalizedBy analyzeReport
+jacocoTestReport.finalizedBy jacocoTestCoverageVerification
 
 def jmhHumanOutputPath = "$buildDir/reports/jmh/human.txt"
 jmh {
@@ -629,6 +602,7 @@ jmh {
   jvmArgsPrepend = '-Xmx3g'
   humanOutputFile = project.file("$jmhHumanOutputPath")
   resultsFile = project.file("$buildDir/reports/jmh/results.txt")
+  profilers = ['gc', 'stack']
 }
 tasks.getByName('jmh').doLast() {
   println "Benchmark report generated: file://$jmhHumanOutputPath"
@@ -649,4 +623,17 @@ startScripts {
   doLast {
     unixScript.text = unixScript.text.replace('CLASSPATH=', "CLASSPATH=${environmentClasspathPrefix}:")
   }
+}
+
+// Include a script to run the recovery tool.
+task moreStartScripts(type: CreateStartScripts) {
+  mainClassName = 'org.apache.aurora.scheduler.storage.durability.RecoveryTool'
+  applicationName = 'recovery-tool'
+  outputDir = new File(project.buildDir, 'scripts')
+  classpath = jar.outputs.files + project.configurations.runtime
+}
+
+applicationDistribution.into('bin') {
+  from(moreStartScripts)
+  fileMode = 0755
 }

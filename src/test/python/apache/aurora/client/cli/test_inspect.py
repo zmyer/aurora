@@ -138,11 +138,14 @@ Process 'process':
         "production": False,
         "role": "bozo",
         "contact": "bozo@the.clown",
+        "metadata": [],
         "lifecycle": {
             "http": {
                 "graceful_shutdown_endpoint": "/quitquitquit",
                 "port": "health",
-                "shutdown_endpoint": "/abortabortabort"}},
+                "shutdown_endpoint": "/abortabortabort",
+                "graceful_shutdown_wait_secs": 5,
+                "shutdown_wait_secs": 5}},
         "priority": 0}
 
     mock_output = "\n".join(mock_stdout)

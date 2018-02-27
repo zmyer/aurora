@@ -39,9 +39,9 @@ import org.apache.aurora.scheduler.events.EventSink;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.junit.Before;
 import org.junit.Test;
 import org.quartz.JobExecutionContext;
@@ -59,7 +59,7 @@ import static org.junit.Assert.assertTrue;
 public class CronIT extends EasyMockTest {
   public static final CrontabEntry CRONTAB_ENTRY = CrontabEntry.parse("* * * * *");
 
-  private static final IJobKey JOB_KEY = JobKeys.from("roll", "b", "c");
+  private static final IJobKey JOB_KEY = JobKeys.from("roll", "prod", "c");
   private static final Identity IDENTITY = new Identity().setUser("user");
 
   private static final IJobConfiguration CRON_JOB = IJobConfiguration.build(
@@ -79,13 +79,13 @@ public class CronIT extends EasyMockTest {
   @Before
   public void setUp() throws Exception {
     stateManager = createMock(StateManager.class);
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     auroraCronJob = createMock(AuroraCronJob.class);
 
     injector = Guice.createInjector(
         // Override to verify that Guice is actually used for construction of the AuroraCronJob.
         // TODO(ksweeney): Use the production class here.
-        Modules.override(new CronModule()).with(new AbstractModule() {
+        Modules.override(new CronModule(new CronModule.Options())).with(new AbstractModule() {
           @Override
           protected void configure() {
             bind(AuroraCronJob.class).toInstance(auroraCronJob);

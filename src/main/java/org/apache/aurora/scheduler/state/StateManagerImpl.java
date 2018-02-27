@@ -16,24 +16,23 @@ package org.apache.aurora.scheduler.state;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
-import com.google.common.collect.Sets;
 
 import org.apache.aurora.common.util.Clock;
 import org.apache.aurora.gen.AssignedTask;
@@ -54,7 +53,7 @@ import org.apache.aurora.scheduler.storage.TaskStore;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.mesos.Protos.SlaveID;
+import org.apache.mesos.v1.Protos.AgentID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -120,13 +119,10 @@ public class StateManagerImpl implements StateManager {
     Set<IScheduledTask> scheduledTasks = FluentIterable.from(instanceIds)
         .transform(instanceId -> createTask(instanceId, task)).toSet();
 
-    Iterable<IScheduledTask> existingTasks = storeProvider.getTaskStore().fetchTasks(
-        Query.jobScoped(task.getJob()).active());
+    Iterable<IScheduledTask> collision = storeProvider.getTaskStore().fetchTasks(
+        Query.instanceScoped(task.getJob(), instanceIds).active());
 
-    Set<Integer> existingInstanceIds =
-        FluentIterable.from(existingTasks).transform(Tasks::getInstanceId).toSet();
-
-    if (!Sets.intersection(existingInstanceIds, instanceIds).isEmpty()) {
+    if (!Iterables.isEmpty(collision)) {
       throw new IllegalArgumentException("Instance ID collision detected.");
     }
 
@@ -138,7 +134,7 @@ public class StateManagerImpl implements StateManager {
           Tasks.id(scheduledTask),
           Optional.of(scheduledTask),
           Optional.of(PENDING),
-          Optional.absent());
+          Optional.empty());
     }
   }
 
@@ -163,7 +159,7 @@ public class StateManagerImpl implements StateManager {
       MutableStoreProvider storeProvider,
       String taskId,
       String slaveHost,
-      SlaveID slaveId,
+      AgentID slaveId,
       Function<IAssignedTask, IAssignedTask> resourceAssigner) {
 
     checkNotBlank(taskId);
@@ -183,10 +179,10 @@ public class StateManagerImpl implements StateManager {
 
     StateChangeResult changeResult = updateTaskAndExternalState(
         storeProvider.getUnsafeTaskStore(),
-        Optional.absent(),
+        Optional.empty(),
         taskId,
         ASSIGNED,
-        Optional.absent());
+        Optional.empty());
 
     Preconditions.checkState(
         changeResult == SUCCESS,
@@ -236,6 +232,7 @@ public class StateManagerImpl implements StateManager {
       Action.INCREMENT_FAILURES,
       Action.SAVE_STATE,
       Action.RESCHEDULE,
+      Action.TRANSITION_TO_LOST,
       Action.KILL,
       Action.DELETE);
 
@@ -293,14 +290,29 @@ public class StateManagerImpl implements StateManager {
           Optional<IScheduledTask> mutated = taskStore.mutateTask(taskId, task1 -> {
             ScheduledTask mutableTask = task1.newBuilder();
             mutableTask.setStatus(targetState.get());
+            if (targetState.get() == ScheduleStatus.PARTITIONED) {
+              mutableTask.setTimesPartitioned(mutableTask.getTimesPartitioned() + 1);
+              // If we're moving to partitioned state, remove any existing partition transitions
+              // in order to prevent the event history growing unbounded.
+              mutableTask.setTaskEvents(compactPartitionEvents(mutableTask.getTaskEvents()));
+            }
             mutableTask.addToTaskEvents(new TaskEvent()
                 .setTimestamp(clock.nowMillis())
                 .setStatus(targetState.get())
-                .setMessage(transitionMessage.orNull())
+                .setMessage(transitionMessage.orElse(null))
                 .setScheduler(LOCAL_HOST_SUPPLIER.get()));
             return IScheduledTask.build(mutableTask);
           });
           events.add(TaskStateChange.transition(mutated.get(), stateMachine.getPreviousState()));
+          break;
+
+        case TRANSITION_TO_LOST:
+          updateTaskAndExternalState(
+              taskStore,
+              Optional.empty(),
+              taskId,
+              ScheduleStatus.LOST,
+              Optional.of("Action performed on partitioned task, marking as LOST."));
           break;
 
         case RESCHEDULE:
@@ -347,7 +359,10 @@ public class StateManagerImpl implements StateManager {
               "Operation expected task %s to be present.",
               taskId);
 
-          events.add(deleteTasks(taskStore, ImmutableSet.of(taskId)));
+          PubsubEvent.TasksDeleted event = createDeleteEvent(taskStore, ImmutableSet.of(taskId));
+          taskStore.deleteTasks(
+              event.getTasks().stream().map(Tasks::id).collect(Collectors.toSet()));
+          events.add(event);
           break;
 
         default:
@@ -367,25 +382,48 @@ public class StateManagerImpl implements StateManager {
     return result.getResult();
   }
 
-  @Override
-  public void deleteTasks(MutableStoreProvider storeProvider, final Set<String> taskIds) {
-    Map<String, IScheduledTask> tasks = Maps.uniqueIndex(
-        storeProvider.getTaskStore().fetchTasks(Query.taskScoped(taskIds)),
-        Tasks::id);
-
-    for (Map.Entry<String, IScheduledTask> entry : tasks.entrySet()) {
-      updateTaskAndExternalState(
-          storeProvider.getUnsafeTaskStore(),
-          entry.getKey(),
-          Optional.of(entry.getValue()),
-          Optional.absent(),
-          Optional.absent());
+  /*
+   * Compact cyclical transitions into PARTITIONED into a single event in order to place an upper
+   * bound on the number of task events for a task. We do not want to lose unique transitions.
+   * So consider the following history:
+   *
+   *  ... ->  RUNNING -> PARTITIONED -> RUNNING -> PARTITIONED -> RUNNING -> PARTITIONED
+   *
+   * We'd want to compact this into a single RUNNING -> PARTITIONED where RUNNING is the first
+   * occurence of RUNNING. But consider another example:
+   *
+   * ... -> RUNNING -> PARTITIONED -> RUNNING -> DRAINING -> PARTITIONED
+   *
+   * In this case, there is no compaction to be done because there is no cycle.
+   */
+  private List<TaskEvent> compactPartitionEvents(List<TaskEvent> taskEvents) {
+    int size = taskEvents.size();
+    // We only compact as we're transitioning into PARTITIONED. So cycles happen when the second
+    // last event is PARTITIONED and the last and third last statuses are the same.
+    if (size >= 3 && taskEvents.get(size - 2).getStatus().equals(ScheduleStatus.PARTITIONED)
+        && taskEvents.get(size - 3).getStatus().equals(taskEvents.get(size - 1).getStatus())) {
+      // Drop the last two elements off taskEvents.
+      return taskEvents.subList(0, size - 2);
     }
+    return taskEvents;
   }
 
-  private static PubsubEvent deleteTasks(TaskStore.Mutable taskStore, Set<String> taskIds) {
-    Iterable<IScheduledTask> tasks = taskStore.fetchTasks(Query.taskScoped(taskIds));
-    taskStore.deleteTasks(taskIds);
-    return new PubsubEvent.TasksDeleted(ImmutableSet.copyOf(tasks));
+  @Override
+  public void deleteTasks(MutableStoreProvider storeProvider, final Set<String> taskIds) {
+    TaskStore.Mutable taskStore = storeProvider.getUnsafeTaskStore();
+    // Create a single event for all task deletions.
+    PubsubEvent.TasksDeleted event = createDeleteEvent(taskStore, taskIds);
+
+    taskStore.deleteTasks(event.getTasks().stream().map(Tasks::id).collect(Collectors.toSet()));
+
+    eventSink.post(event);
+  }
+
+  private static PubsubEvent.TasksDeleted createDeleteEvent(
+      TaskStore.Mutable taskStore,
+      Set<String> taskIds) {
+
+    return new PubsubEvent.TasksDeleted(
+        ImmutableSet.copyOf(taskStore.fetchTasks(Query.taskScoped(taskIds))));
   }
 }

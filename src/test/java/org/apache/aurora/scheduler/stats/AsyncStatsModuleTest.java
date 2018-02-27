@@ -17,12 +17,14 @@ import com.google.common.collect.ImmutableList;
 
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.gen.HostAttributes;
-import org.apache.aurora.scheduler.HostOffer;
+import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.resources.ResourceTestUtil;
+import org.apache.aurora.scheduler.resources.ResourceType;
 import org.apache.aurora.scheduler.stats.SlotSizeCounter.MachineResource;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
-import org.apache.mesos.Protos;
+import org.apache.mesos.v1.Protos;
+import org.junit.Before;
 import org.junit.Test;
 
 import static org.apache.aurora.scheduler.resources.ResourceTestUtil.mesosScalar;
@@ -34,14 +36,20 @@ import static org.easymock.EasyMock.expect;
 import static org.junit.Assert.assertEquals;
 
 public class AsyncStatsModuleTest extends EasyMockTest {
+
+  @Before
+  public void setUp() {
+    ResourceType.initializeEmptyCliArgsForTest();
+  }
+
   @Test
   public void testOfferAdapter() {
     OfferManager offerManager = createMock(OfferManager.class);
-    expect(offerManager.getOffers()).andReturn(ImmutableList.of(
+    expect(offerManager.getAll()).andReturn(ImmutableList.of(
         new HostOffer(Protos.Offer.newBuilder()
             .setId(Protos.OfferID.newBuilder().setValue("offerId"))
             .setFrameworkId(Protos.FrameworkID.newBuilder().setValue("frameworkId"))
-            .setSlaveId(Protos.SlaveID.newBuilder().setValue("slaveId"))
+            .setAgentId(Protos.AgentID.newBuilder().setValue("slaveId"))
             .setHostname("hostName")
             .addResources(mesosScalar(CPUS, 2.0, true))
             .addResources(mesosScalar(CPUS, 4.0, false))

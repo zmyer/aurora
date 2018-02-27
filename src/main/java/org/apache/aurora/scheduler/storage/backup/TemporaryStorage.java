@@ -17,7 +17,6 @@ import java.util.Set;
 
 import com.google.common.base.Function;
 import com.google.common.collect.FluentIterable;
-import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 
 import org.apache.aurora.common.util.BuildInfo;
@@ -25,13 +24,15 @@ import org.apache.aurora.common.util.testing.FakeClock;
 import org.apache.aurora.gen.storage.Snapshot;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.Tasks;
-import org.apache.aurora.scheduler.storage.SnapshotStore;
+import org.apache.aurora.scheduler.storage.Snapshotter;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
+import org.apache.aurora.scheduler.storage.durability.Loader;
+import org.apache.aurora.scheduler.storage.durability.Persistence.Edit;
+import org.apache.aurora.scheduler.storage.durability.ThriftBackfill;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
-import org.apache.aurora.scheduler.storage.log.SnapshotStoreImpl;
-import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
+import org.apache.aurora.scheduler.storage.log.SnapshotterImpl;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 
 import static java.util.Objects.requireNonNull;
 
@@ -79,25 +80,15 @@ interface TemporaryStorage {
 
     @Override
     public TemporaryStorage apply(Snapshot snapshot) {
-      final Storage storage = DbUtil.createFlaggedStorage();
-      final BuildInfo buildInfo = generateBuildInfo();
+      Storage storage = MemStorageModule.newEmptyStorage();
+      BuildInfo buildInfo = generateBuildInfo();
       FakeClock clock = new FakeClock();
       clock.setNowMillis(snapshot.getTimestamp());
-      final SnapshotStore<Snapshot> snapshotStore = new SnapshotStoreImpl(
-          buildInfo,
-          clock,
-          storage,
-          // Safe to pass false here to default to the non-experimental task store
-          // during restore from backup procedure.
-          false /** useDbSnapshotForTaskStore */,
-          // Safe to pass empty set here because during backup restore we are not deciding which
-          // fields to write to the snapshot.
-          ImmutableSet.of() /** hydrateFields */,
-          // We can just pass an empty lambda for the MigrationManager as migration is a no-op
-          // when restoring from backup.
-          () -> { } /** migrationManager */,
-          thriftBackfill);
-      snapshotStore.applySnapshot(snapshot);
+      Snapshotter snapshotter = new SnapshotterImpl(buildInfo, clock);
+
+      storage.write((NoResult.Quiet) stores -> {
+        Loader.load(stores, thriftBackfill, snapshotter.asStream(snapshot).map(Edit::op));
+      });
 
       return new TemporaryStorage() {
         @Override
@@ -117,7 +108,7 @@ interface TemporaryStorage {
 
         @Override
         public Snapshot toSnapshot() {
-          return snapshotStore.createSnapshot();
+          return storage.write(snapshotter::from);
         }
       };
     }

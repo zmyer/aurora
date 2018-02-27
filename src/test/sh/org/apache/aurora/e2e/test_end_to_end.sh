@@ -79,6 +79,57 @@ test_version() {
   [[ $(aurora --version 2>&1) = $(cat /vagrant/.auroraversion) ]]
 }
 
+clear_mesos_maintenance() {
+  curl http://"$TEST_SLAVE_IP":5050/maintenance/schedule \
+    -H "Content-type: application/json" \
+    -X POST \
+    -d "{}"
+}
+
+test_mesos_maintenance() {
+  local _cluster=$1 _role=$2 _env=$3
+  local _base_config=$4
+  local _job=$7
+  local _jobkey="$_cluster/$_role/$_env/$_job"
+
+  # Clear any previous maintenance schedules before running this test.
+  clear_mesos_maintenance
+
+  test_create $_jobkey $_base_config
+
+  echo "Waiting job to enter RUNNING..."
+  wait_until_task_status $_jobkey "0" "RUNNING"
+
+  # Create the maintenance schedule
+  MAINTENANCE_SCHEDULE="/tmp/maintenance_schedule.json"
+  python \
+  /vagrant/src/test/sh/org/apache/aurora/e2e/generate_mesos_maintenance_schedule.py > "$MAINTENANCE_SCHEDULE"
+  echo "Creating maintenance with schedule"
+  cat $MAINTENANCE_SCHEDULE | jq .
+
+  curl http://"$TEST_SLAVE_IP":5050/maintenance/schedule \
+    -H "Content-type: application/json" \
+    -X POST \
+    -d @"$MAINTENANCE_SCHEDULE"
+
+  trap clear_mesos_maintenance EXIT
+
+  # Posting of a maintenance schedule should not cause the task to drain right
+  # away.
+  assert_task_status $_jobkey "0" "RUNNING"
+
+  # When it is drain time, it should be killed.
+  echo "Waiting for time to drain tasks..."
+  wait_until_task_status $_jobkey "0" "PENDING"
+
+  clear_mesos_maintenance
+
+  echo "Waiting for drained task to re-launch..."
+  wait_until_task_status $_jobkey "0" "RUNNING"
+
+  test_kill $_jobkey
+}
+
 test_health_check() {
   [[ $(_curl "$TEST_SLAVE_IP:8081/health") == 'OK' ]]
 }
@@ -167,6 +218,39 @@ assert_update_state() {
   fi
 }
 
+assert_task_status() {
+  local _jobkey=$1 _id=$2 _expected_state=$3
+
+  local _state=$(aurora job status $_jobkey --write-json | jq -r ".[0].active[$_id].status")
+
+  if [[ $_state != $_expected_state ]]; then
+    echo "Expected task to be in state $_expected_state, but found $_state"
+    exit 1
+  fi
+}
+
+wait_until_task_status() {
+  # Poll the task, waiting for it to enter the target state
+  local _jobkey=$1 _id=$2 _expected_state=$3
+  local _state=""
+  local _success=0
+
+  for i in $(seq 1 120); do
+    _state=$(aurora job status $_jobkey --write-json | jq -r ".[0].active[$_id].status")
+    if [[ $_state == $_expected_state ]]; then
+      _success=1
+      break
+    else
+      sleep 1
+    fi
+  done
+
+  if [[ "$_success" -ne "1" ]]; then
+    echo "Task did not transition to $_expected_state within two minutes."
+    exit 1
+  fi
+}
+
 test_update() {
   local _jobkey=$1 _config=$2 _cluster=$3
   shift 3
@@ -177,7 +261,7 @@ test_update() {
   local _update_id=$(aurora update list $_jobkey --status ROLLING_FORWARD \
       | tail -n +2 | awk '{print $2}')
   aurora_admin scheduler_snapshot devcluster
-  sudo restart aurora-scheduler
+  sudo systemctl restart aurora-scheduler
   assert_update_state $_jobkey 'ROLLING_FORWARD'
   aurora update pause $_jobkey --message='hello'
   assert_update_state $_jobkey 'ROLL_FORWARD_PAUSED'
@@ -218,6 +302,43 @@ test_update_fail() {
     echo "Update should have completed in ROLLED_BACK state due to failed healthcheck."
     exit 1
   fi
+}
+
+test_partition_awareness() {
+  local _config=$1 _cluster=$2 _default_jobkey=$3 _disabled_jobkey=$4 _delay_jobkey=$5
+
+  # create three jobs with different partition policies
+  aurora update start --wait $_default_jobkey $_config
+  aurora update start --wait $_disabled_jobkey $_config
+  aurora update start --wait $_delay_jobkey $_config
+
+  # partition the agent
+  sudo systemctl stop mesos-slave
+
+  # the default job should become LOST and then transition to PENDING
+  wait_until_task_status $_default_jobkey "0" "PENDING"
+
+  # the other two should be PARTITIONED
+  assert_task_status $_disabled_jobkey "0" "PARTITIONED"
+  assert_task_status $_delay_jobkey "0" "PARTITIONED"
+
+  # start the agent back up
+  sudo systemctl start mesos-slave
+
+  # This can be removed when https://issues.apache.org/jira/browse/MESOS-6406 is resolved.
+  # We have to pause and let the agent reregister with Mesos, then ask Aurora to explicitly
+  # reconcile to get the RUNNING status update.
+  sleep 30
+  aurora_admin reconcile_tasks $_cluster
+
+  # the PARTITIONED tasks should now be running
+  assert_task_status $_disabled_jobkey "0" "RUNNING"
+  assert_task_status $_delay_jobkey "0" "RUNNING"
+
+  # Clean up
+  aurora job killall $_default_jobkey
+  aurora job killall $_disabled_jobkey
+  aurora job killall $_delay_jobkey
 }
 
 test_announce() {
@@ -267,11 +388,62 @@ test_run() {
   [[ "$sandbox_contents" = "      3 .logs" ]]
 }
 
+test_scp_success() {
+  local _jobkey=$1/0
+  local _filename=scp_success.txt
+  local _expected_return="      1 scp_success.txt"
+
+  # Unset because grep can return 1 if the file does not exist
+  set +e
+
+  # Ensure file does not exists before scp
+  pre_sandbox_contents=$(aurora task run $_jobkey "ls" | awk '{print $2}' | grep ${_filename} | sort | uniq -c)
+  [[ "$pre_sandbox_contents" != $_expected_return ]]
+
+  # Reset -e after command has been run
+  set -e
+
+  # Create a file and move it to the sandbox of a job
+  touch $_filename
+  aurora task scp $_filename ${_jobkey}:
+  sandbox_contents=$(aurora task run $_jobkey "ls" | awk '{print $2}' | grep ${_filename} | sort | uniq -c)
+  [[ "$sandbox_contents" == $_expected_return ]]
+}
+
+test_scp_permissions() {
+  local _jobkey=$1/0
+  local _filename=scp_fail_permission.txt
+  local _retcode=0
+  local _sandbox_contents
+  # Create a file and try to move it, ensure we get permission denied
+  touch $_filename
+
+  # Unset because we are expecting an error
+  set +e
+
+  _sandbox_contents=$(aurora task scp $_filename ${_jobkey}:../ 2>&1 > /dev/null)
+  _retcode=$?
+
+  # Reset -e after command has been run
+  set -e
+
+  if [[ "$_retcode" != 1 ]]; then
+    echo "Permission to exit chroot jail given when should have failed"
+    exit 1
+  fi
+  if [[ "$_sandbox_contents" != *"../scp_fail_permission.txt: Permission denied"* ]]; then
+    echo "Unexpected response from invalid scp command"
+    exit 1
+  fi
+}
+
 test_kill() {
   local _jobkey=$1
+  shift 1
+  local _extra_args="${@}"
 
-  aurora job kill $_jobkey/1
-  aurora job killall $_jobkey
+  aurora job kill $_jobkey/1 $_extra_args
+  aurora job killall $_jobkey $_extra_args
 }
 
 test_quota() {
@@ -327,6 +499,41 @@ test_thermos_profile() {
   [[ "$read_env_output" = "hello" ]]
 }
 
+BACKUPS_DIR='/var/lib/aurora/backups'
+REPLICATED_LOG_DIR='/var/db/aurora'
+
+test_recovery_tool() {
+  local _cluster=$1
+
+  # As a cursory data validation step, fetch an arbitrary job update to ensure it exists after
+  # recovery completes.
+  update=$(aurora update list devcluster --write-json | jq  -r '.[0] | .job + " " + .id')
+
+  # Take a backup
+  aurora_admin scheduler_backup_now $_cluster
+  sudo systemctl stop aurora-scheduler
+
+  # Reset storage
+  sudo rm -r $REPLICATED_LOG_DIR
+  sudo mesos-log initialize --path=$REPLICATED_LOG_DIR
+
+  # Identify the newest backup file
+  backup=$(basename $(ls -dtr1 $BACKUPS_DIR/* | tail -n1))
+
+  # Recover
+  sudo /home/vagrant/aurora/dist/install/aurora-scheduler/bin/recovery-tool \
+    -from BACKUP \
+    -to LOG \
+    -backup $BACKUPS_DIR/$backup \
+    -native_log_zk_group_path=/aurora/replicated-log \
+    -native_log_file_path=$REPLICATED_LOG_DIR \
+    -zk_endpoints=localhost:2181
+  sudo systemctl start aurora-scheduler
+
+  # This command exits non-zero if the update is not found.
+  aurora update info $update
+}
+
 test_http_example() {
   local _cluster=$1 _role=$2 _env=$3
   local _base_config=$4 _updated_config=$5
@@ -354,6 +561,13 @@ test_http_example() {
   test_update $_jobkey $_updated_config $_cluster $_bind_parameters
   test_announce $_role $_env $_job
   test_run $_jobkey
+  # TODO(AURORA-1926): 'aurora task scp' only works fully on Mesos containers (can only read for
+  # Docker). See if it is possible to enable write for Docker sandboxes as well then remove the
+  # 'if' guard below.
+  if [[ $_job != *"docker"* ]]; then
+    test_scp_success $_jobkey
+    test_scp_permissions $_jobkey
+  fi
   test_kill $_jobkey
   test_quota $_cluster $_role
 }
@@ -443,14 +657,14 @@ setup_image_stores() {
   # build the appc image from the docker image
   docker2aci http_example_netcat-latest.tar
 
-  APPC_IMAGE_ID="sha512-$(sha512sum http_example_netcat-latest.aci | awk '{print $1}')"
+  APPC_IMAGE_ID="sha512-$(sha512sum library-http_example_netcat-latest.aci | awk '{print $1}')"
   export APPC_IMAGE_ID
   APPC_IMAGE_DIRECTORY="/tmp/mesos/images/appc/images/$APPC_IMAGE_ID"
 
   sudo mkdir -p "$APPC_IMAGE_DIRECTORY"
-  sudo tar -xf http_example_netcat-latest.aci -C "$APPC_IMAGE_DIRECTORY"
+  sudo tar -xf library-http_example_netcat-latest.aci -C "$APPC_IMAGE_DIRECTORY"
   # This restart is necessary for mesos to pick up the image from the local store.
-  sudo restart mesos-slave
+  sudo systemctl restart mesos-slave
 
   popd
   rm -rf "$TEMP_PATH"
@@ -512,6 +726,7 @@ TEST_CLUSTER=devcluster
 TEST_ROLE=vagrant
 TEST_ENV=test
 TEST_JOB=http_example
+TEST_MAINTENANCE_JOB=http_example_maintenance
 TEST_JOB_WATCH_SECS=http_example_watch_secs
 TEST_JOB_REVOCABLE=http_example_revocable
 TEST_JOB_GPU=http_example_gpu
@@ -525,6 +740,10 @@ TEST_EPHEMERAL_DAEMON_WITH_FINAL_JOB=ephemeral_daemon_with_final
 TEST_EPHEMERAL_DAEMON_WITH_FINAL_CONFIG_FILE=$TEST_ROOT/ephemeral_daemon_with_final.aurora
 TEST_DAEMONIZING_PROCESS_JOB=daemonize
 TEST_DAEMONIZING_PROCESS_CONFIG_FILE=$TEST_ROOT/test_daemonizing_process.aurora
+TEST_PARTITION_AWARENESS_CONFIG_FILE=$TEST_ROOT/partition_aware.aurora
+TEST_JOB_PA_DEFAULT=$TEST_CLUSTER/$TEST_ROLE/$TEST_ENV/partition_aware_default
+TEST_JOB_PA_DISABLED=$TEST_CLUSTER/$TEST_ROLE/$TEST_ENV/partition_aware_disabled
+TEST_JOB_PA_DELAY=$TEST_CLUSTER/$TEST_ROLE/$TEST_ENV/partition_aware_delay
 
 BASE_ARGS=(
   $TEST_CLUSTER
@@ -536,6 +755,8 @@ BASE_ARGS=(
 )
 
 TEST_JOB_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB")
+
+TEST_MAINTENANCE_JOB_ARGS=("${BASE_ARGS[@]}" "$TEST_MAINTENANCE_JOB")
 
 TEST_JOB_WATCH_SECS_ARGS=("${BASE_ARGS[@]}" "$TEST_JOB_WATCH_SECS")
 
@@ -563,20 +784,36 @@ TEST_DAEMONIZING_PROCESS_ARGS=(
   $TEST_DAEMONIZING_PROCESS_CONFIG_FILE
 )
 
+TEST_PARTITION_AWARENESS_ARGS=(
+  $TEST_PARTITION_AWARENESS_CONFIG_FILE
+  $TEST_CLUSTER
+  $TEST_JOB_PA_DEFAULT
+  $TEST_JOB_PA_DISABLED
+  $TEST_JOB_PA_DELAY
+)
+
+TEST_JOB_KILL_MESSAGE_ARGS=("${TEST_JOB_ARGS[@]}" "--message='Test message'")
+
 trap collect_result EXIT
 
 aurorabuild all
 setup_ssh
 setup_docker_registry
 
+test_partition_awareness "${TEST_PARTITION_AWARENESS_ARGS[@]}"
+
 test_version
 test_http_example "${TEST_JOB_ARGS[@]}"
 test_http_example "${TEST_JOB_WATCH_SECS_ARGS[@]}"
 test_health_check
 
+test_mesos_maintenance "${TEST_MAINTENANCE_JOB_ARGS[@]}"
+
 test_http_example_basic "${TEST_JOB_REVOCABLE_ARGS[@]}"
 
 test_http_example_basic "${TEST_JOB_GPU_ARGS[@]}"
+
+test_http_example_basic "${TEST_JOB_KILL_MESSAGE_ARGS[@]}"
 
 test_http_example "${TEST_JOB_DOCKER_ARGS[@]}"
 
@@ -590,6 +827,8 @@ test_basic_auth_unauthenticated  "${TEST_JOB_ARGS[@]}"
 test_ephemeral_daemon_with_final "${TEST_JOB_EPHEMERAL_DAEMON_WITH_FINAL_ARGS[@]}"
 
 test_daemonizing_process "${TEST_DAEMONIZING_PROCESS_ARGS[@]}"
+
+test_recovery_tool $TEST_CLUSTER
 
 /vagrant/src/test/sh/org/apache/aurora/e2e/test_kerberos_end_to_end.sh
 /vagrant/src/test/sh/org/apache/aurora/e2e/test_bypass_leader_redirect_end_to_end.sh

@@ -14,9 +14,9 @@
 package org.apache.aurora.scheduler.cron.quartz;
 
 import java.util.HashMap;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
@@ -33,8 +33,8 @@ import org.apache.aurora.scheduler.state.StateChangeResult;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.easymock.Capture;
 import org.junit.Before;
 import org.junit.Test;
@@ -50,7 +50,7 @@ import static org.easymock.EasyMock.capture;
 import static org.easymock.EasyMock.eq;
 import static org.easymock.EasyMock.expect;
 import static org.easymock.EasyMock.expectLastCall;
-import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class AuroraCronJobTest extends EasyMockTest {
@@ -65,7 +65,7 @@ public class AuroraCronJobTest extends EasyMockTest {
 
   @Before
   public void setUp() throws Exception {
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     stateManager = createMock(StateManager.class);
     backoffHelper = createMock(BackoffHelper.class);
     context = createMock(JobExecutionContext.class);
@@ -101,11 +101,11 @@ public class AuroraCronJobTest extends EasyMockTest {
     populateStorage(CronCollisionPolicy.CANCEL_NEW);
     auroraCronJob.doExecute(context);
 
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     populateStorage(CronCollisionPolicy.KILL_EXISTING);
     auroraCronJob.doExecute(context);
 
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     populateStorage(CronCollisionPolicy.RUN_OVERLAP);
     auroraCronJob.doExecute(context);
   }
@@ -138,7 +138,7 @@ public class AuroraCronJobTest extends EasyMockTest {
     expect(stateManager.changeState(
         anyObject(),
         eq(TASK_ID),
-        eq(Optional.absent()),
+        eq(Optional.empty()),
         eq(ScheduleStatus.KILLING),
         eq(AuroraCronJob.KILL_AUDIT_MESSAGE)))
         .andReturn(StateChangeResult.SUCCESS);
@@ -157,13 +157,18 @@ public class AuroraCronJobTest extends EasyMockTest {
 
     // Simulate a trigger in progress.
     jobDetails.getJobDataMap().put(JobKeys.canonicalString(AURORA_JOB_KEY), null);
-    assertFalse(jobDetails.getJobDataMap().isEmpty());
+    assertEquals(
+        jobDetails.getJobDataMap().get(JobKeys.canonicalString(AURORA_JOB_KEY)),
+        null);
 
     // Attempt a concurrent run that must be rejected.
     auroraCronJob.doExecute(context);
 
     // Complete previous run and trigger another one.
     killResult.complete(BatchWorker.NO_RESULT);
+    assertEquals(
+        jobDetails.getJobDataMap().get(JobKeys.canonicalString(AURORA_JOB_KEY)),
+        AURORA_JOB_KEY);
     auroraCronJob.doExecute(context);
     assertTrue(jobDetails.getJobDataMap().isEmpty());
   }

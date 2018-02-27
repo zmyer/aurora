@@ -14,8 +14,7 @@
 package org.apache.aurora.scheduler.state;
 
 import java.util.Objects;
-
-import com.google.common.base.Optional;
+import java.util.Optional;
 
 import org.apache.aurora.gen.ScheduleStatus;
 
@@ -66,6 +65,11 @@ class SideEffect {
      * Send an instruction for the runner of this task to kill the task.
      */
     KILL,
+
+    /**
+     * Transition a task to LOST.
+     */
+    TRANSITION_TO_LOST,
 
     /**
      * Create a new state machine with a copy of this task.

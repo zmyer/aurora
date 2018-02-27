@@ -16,10 +16,6 @@ Required flags:
 	Directory to store backups under. Will be created if it does not exist.
 -cluster_name [not null]
 	Name to identify the cluster being served.
--db_max_active_connection_count [must be > 0]
-	Max number of connections to use with database via MyBatis
--db_max_idle_connection_count [must be > 0]
-	Max number of idle connections to the database via MyBatis
 -framework_authentication_file
 	Properties file which contains framework credentials to authenticate with Mesosmaster. Must contain the properties 'aurora_authentication_principal' and 'aurora_authentication_secret'.
 -ip
@@ -50,6 +46,8 @@ Optional flags:
 	Allow jobs to request Mesos GPU resource.
 -allowed_container_types (default [MESOS])
 	Container types that are allowed to be used by jobs.
+-allowed_job_environments (default ^(prod|devel|test|staging\d*)$)
+	Regular expression describing the environments that are allowed to be used by jobs.
 -async_slot_stat_update_interval (default (1, mins))
 	Interval on which to try to update open slot stats.
 -async_task_stat_update_interval (default (1, hrs))
@@ -70,10 +68,6 @@ Optional flags:
 	TimeZone to use for cron predictions.
 -custom_executor_config [file must exist, file must be readable]
 	Path to custom executor settings configuration file.
--db_lock_timeout (default (1, mins))
-	H2 table lock timeout
--db_row_gc_interval (default (2, hrs))
-	Interval on which to scan the database for unused row references.
 -default_docker_parameters (default {})
 	Default docker parameters for any job that does not explicitly declare parameters.
 -dlog_max_entry_size (default (512, KB))
@@ -84,10 +78,6 @@ Optional flags:
 	Specifies the frequency at which snapshots of local storage are taken and written to the log.
 -enable_cors_for
 	List of domains for which CORS support should be enabled.
--enable_db_metrics (default true)
-	Whether to use MyBatis interceptor to measure the timing of intercepted Statements.
--enable_h2_console (default false)
-	Enable H2 DB management console.
 -enable_mesos_fetcher (default false)
 	Allow jobs to pass URIs to the Mesos Fetcher. Note that enabling this feature could pose a privilege escalation threat.
 -enable_preemptor (default true)
@@ -186,10 +176,16 @@ Optional flags:
 	Maximum amount of random jitter to add to the offer hold time window.
 -offer_reservation_duration (default (3, mins))
 	Time to reserve a agent's offers while trying to satisfy a task preempting another.
+-offer_set_module (default [class org.apache.aurora.scheduler.offers.OfferSetModule])
+  Guice module for replacing offer holding and scheduling logic.
+-partition_aware (default false)
+  Whether or not to integrate with the partition-aware Mesos capabilities.
 -populate_discovery_info (default false)
 	If true, Aurora populates DiscoveryInfo field of Mesos TaskInfo.
 -preemption_delay (default (3, mins))
 	Time interval after which a pending task becomes eligible to preempt other tasks
+-preemption_slot_finder_modules (default [class org.apache.aurora.scheduler.preemptor.PendingTaskProcessorModule, class org.apache.aurora.scheduler.preemptor.PreemptionVictimFilterModule])
+  Guice modules for replacing preemption logic.
 -preemption_slot_hold_time (default (5, mins))
 	Time to hold a preemption slot found before it is discarded.
 -preemption_slot_search_interval (default (1, mins))
@@ -224,16 +220,12 @@ Optional flags:
 	Metric categories collected for production tasks.
 -sla_stat_refresh_interval (default (1, mins))
 	The SLA stat refresh interval.
--slow_query_log_threshold (default (25, ms))
-	Log all queries that take at least this long to execute.
--slow_query_log_threshold (default (25, ms))
-	Log all queries that take at least this long to execute.
--snapshot_hydrate_stores (default [locks, hosts, quota, job_updates])
-	Which H2-backed stores to fully hydrate on the Snapshot.
 -stat_retention_period (default (1, hrs))
 	Time for a stat to be retained in memory before expiring.
 -stat_sampling_interval (default (1, secs))
 	Statistic value sampling interval.
+-task_assigner_modules (default [class org.apache.aurora.scheduler.scheduling.TaskAssignerImplModule])
+  Guice modules for replacing task assignment logic.
 -thermos_executor_cpu (default 0.25)
 	The number of CPU cores to allocate for each instance of the executor.
 -thermos_executor_flags
@@ -244,10 +236,10 @@ Optional flags:
 	A comma separated list of additional resources to copy into the sandbox.Note: if thermos_executor_path is not the thermos_executor.pex file itself, this must include it.
 -thermos_home_in_sandbox (default false)
 	If true, changes HOME to the sandbox before running the executor. This primarily has the effect of causing the executor and runner to extract themselves into the sandbox.
+-thrift_method_interceptor_modules (default [])
+	Additional Guice modules for intercepting Thrift method calls.
 -transient_task_state_timeout (default (5, mins))
 	The amount of time after which to treat a task stuck in a transient state as LOST.
--use_beta_db_task_store (default false)
-	Whether to use the experimental database-backed task store.
 -viz_job_url_prefix (default )
 	URL prefix for job container stats.
 -zk_chroot_path

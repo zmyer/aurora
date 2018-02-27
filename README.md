@@ -49,6 +49,7 @@ scheduler itself, you may want to explore developing your own
 ### Companies using Aurora
 Are you using Aurora too?  Let us know, or submit a patch to join the list!
 
+- [Amperity](https://amperity.com)
 - [Blue Yonder](http://www.blue-yonder.com)
 - [Boxever](http://www.boxever.com)
 - [Criteo](http://www.criteo.com)
@@ -56,10 +57,12 @@ Are you using Aurora too?  Let us know, or submit a patch to join the list!
 - [Fitbit](https://fitbit.com)
 - [Foursquare](https://foursquare.com)
 - [Gutefrage.net](https://www.gutefrage.net)
+- [Houghton Mifflin Harcourt](https://www.hmhco.com)
 - [Kakao](https://kakao.com/)
 - [Magine TV](https://magine.com)
 - [Medallia](http://www.medallia.com)
 - [Oscar Health](https://www.hioscar.com)
+- [PayPal](https://www.paypal.com)
 - [Sabre Labs](http://www.sabre.com)
 - [TellApart](https://www.tellapart.com)
 - [Twitter](https://twitter.com)

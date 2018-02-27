@@ -15,11 +15,14 @@ package org.apache.aurora.scheduler.http;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
+import javax.servlet.ServletContext;
 import javax.servlet.ServletContextListener;
 import javax.ws.rs.core.MediaType;
 
 import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.net.HostAndPort;
 import com.google.common.util.concurrent.RateLimiter;
@@ -33,15 +36,12 @@ import com.sun.jersey.api.client.Client;
 import com.sun.jersey.api.client.WebResource;
 import com.sun.jersey.api.client.config.ClientConfig;
 import com.sun.jersey.api.client.config.DefaultClientConfig;
-import com.sun.jersey.api.json.JSONConfiguration;
 
 import org.apache.aurora.GuavaUtils.ServiceManagerIface;
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
 import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
-import org.apache.aurora.common.thrift.Endpoint;
-import org.apache.aurora.common.thrift.ServiceInstance;
 import org.apache.aurora.common.util.BackoffStrategy;
 import org.apache.aurora.gen.ServerInfo;
 import org.apache.aurora.scheduler.AppStartup;
@@ -50,14 +50,16 @@ import org.apache.aurora.scheduler.TierManager;
 import org.apache.aurora.scheduler.app.LifecycleModule;
 import org.apache.aurora.scheduler.app.ServiceGroupMonitor;
 import org.apache.aurora.scheduler.async.AsyncModule;
+import org.apache.aurora.scheduler.config.CliOptions;
 import org.apache.aurora.scheduler.cron.CronJobManager;
+import org.apache.aurora.scheduler.discovery.ServiceInstance;
+import org.apache.aurora.scheduler.discovery.ServiceInstance.Endpoint;
 import org.apache.aurora.scheduler.http.api.GsonMessageBodyHandler;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.scheduling.RescheduleCalculator;
 import org.apache.aurora.scheduler.scheduling.TaskGroups;
 import org.apache.aurora.scheduler.scheduling.TaskGroups.TaskGroupsSettings;
 import org.apache.aurora.scheduler.scheduling.TaskScheduler;
-import org.apache.aurora.scheduler.state.LockManager;
 import org.apache.aurora.scheduler.stats.StatsModule;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.entities.IServerInfo;
@@ -87,8 +89,8 @@ public abstract class AbstractJettyTest extends EasyMockTest {
    *
    * @return A module used in the creation of the servlet container's child injector.
    */
-  protected Module getChildServletModule() {
-    return Modules.EMPTY_MODULE;
+  protected Function<ServletContext, Module> getChildServletModule() {
+    return (servletContext) -> Modules.EMPTY_MODULE;
   }
 
   @Before
@@ -97,11 +99,13 @@ public abstract class AbstractJettyTest extends EasyMockTest {
 
     ServiceGroupMonitor serviceGroupMonitor = createMock(ServiceGroupMonitor.class);
 
+    CliOptions options = new CliOptions();
+
     injector = Guice.createInjector(
-        new StatsModule(),
+        new StatsModule(options.stats),
         new LifecycleModule(),
         new SchedulerServicesModule(),
-        new AsyncModule(),
+        new AsyncModule(options.async),
         new AbstractModule() {
           <T> T bindMock(Class<T> clazz) {
             T mock = createMock(clazz);
@@ -124,7 +128,6 @@ public abstract class AbstractJettyTest extends EasyMockTest {
                     5));
             bind(ServiceGroupMonitor.class).toInstance(serviceGroupMonitor);
             bindMock(CronJobManager.class);
-            bindMock(LockManager.class);
             bindMock(OfferManager.class);
             bindMock(RescheduleCalculator.class);
             bindMock(TaskScheduler.class);
@@ -137,7 +140,7 @@ public abstract class AbstractJettyTest extends EasyMockTest {
             });
           }
         },
-        new JettyServerModule(false));
+        new JettyServerModule(options, false));
 
     schedulers = new AtomicReference<>(ImmutableSet.of());
 
@@ -148,8 +151,8 @@ public abstract class AbstractJettyTest extends EasyMockTest {
   }
 
   protected void setLeadingScheduler(String host, int port) {
-    schedulers.set(
-        ImmutableSet.of(new ServiceInstance().setServiceEndpoint(new Endpoint(host, port))));
+    schedulers.set(ImmutableSet.of(
+        new ServiceInstance(new Endpoint(host, port), ImmutableMap.of())));
   }
 
   protected void unsetLeadingSchduler() {
@@ -171,11 +174,11 @@ public abstract class AbstractJettyTest extends EasyMockTest {
     httpServer = injector.getInstance(HttpService.class).getAddress();
 
     // By default we'll set this instance to be the leader.
-    setLeadingScheduler(httpServer.getHostText(), httpServer.getPort());
+    setLeadingScheduler(httpServer.getHost(), httpServer.getPort());
   }
 
   protected String makeUrl(String path) {
-    return String.format("http://%s:%s%s", httpServer.getHostText(), httpServer.getPort(), path);
+    return String.format("http://%s:%s%s", httpServer.getHost(), httpServer.getPort(), path);
   }
 
   protected WebResource.Builder getPlainRequestBuilder(String path) {
@@ -187,7 +190,6 @@ public abstract class AbstractJettyTest extends EasyMockTest {
   protected WebResource.Builder getRequestBuilder(String path) {
     assertNotNull("HTTP server must be started first", httpServer);
     ClientConfig config = new DefaultClientConfig();
-    config.getFeatures().put(JSONConfiguration.FEATURE_POJO_MAPPING, Boolean.TRUE);
     config.getClasses().add(GsonMessageBodyHandler.class);
     Client client = Client.create(config);
     // Disable redirects so we can unit test them.

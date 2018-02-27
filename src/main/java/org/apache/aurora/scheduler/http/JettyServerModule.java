@@ -17,22 +17,27 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
-import javax.annotation.Nonnegative;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.servlet.DispatcherType;
+import javax.servlet.ServletContext;
 import javax.servlet.ServletContextListener;
 import javax.ws.rs.HttpMethod;
 
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
@@ -48,13 +53,9 @@ import com.google.inject.Provides;
 import com.google.inject.TypeLiteral;
 import com.google.inject.name.Names;
 import com.google.inject.servlet.GuiceFilter;
-import com.google.inject.servlet.GuiceServletContextListener;
+import com.google.inject.servlet.ServletModule;
 import com.google.inject.util.Modules;
-import com.sun.jersey.guice.JerseyServletModule;
-import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
 
-import org.apache.aurora.common.args.Arg;
-import org.apache.aurora.common.args.CmdLine;
 import org.apache.aurora.common.net.http.handlers.AbortHandler;
 import org.apache.aurora.common.net.http.handlers.ContentionPrinter;
 import org.apache.aurora.common.net.http.handlers.HealthHandler;
@@ -65,9 +66,11 @@ import org.apache.aurora.common.net.http.handlers.VarsHandler;
 import org.apache.aurora.common.net.http.handlers.VarsJsonHandler;
 import org.apache.aurora.scheduler.SchedulerServicesModule;
 import org.apache.aurora.scheduler.app.ServiceGroupMonitor.MonitorException;
+import org.apache.aurora.scheduler.config.CliOptions;
 import org.apache.aurora.scheduler.http.api.ApiModule;
 import org.apache.aurora.scheduler.http.api.security.HttpSecurityModule;
 import org.apache.aurora.scheduler.thrift.ThriftModule;
+import org.apache.aurora.scheduler.thrift.aop.AopModule;
 import org.eclipse.jetty.rewrite.handler.RewriteHandler;
 import org.eclipse.jetty.rewrite.handler.RewriteRegexRule;
 import org.eclipse.jetty.server.Handler;
@@ -81,12 +84,12 @@ import org.eclipse.jetty.server.handler.gzip.GzipHandler;
 import org.eclipse.jetty.servlet.DefaultServlet;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.util.resource.Resource;
+import org.jboss.resteasy.plugins.guice.GuiceResteasyBootstrapServletContextListener;
+import org.jboss.resteasy.plugins.server.servlet.HttpServletDispatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static java.util.Objects.requireNonNull;
-
-import static com.sun.jersey.api.json.JSONConfiguration.FEATURE_POJO_MAPPING;
 
 /**
  * Binding module for scheduler HTTP servlets.
@@ -102,35 +105,39 @@ public class JettyServerModule extends AbstractModule {
   // rewritten is stored.
   static final String ORIGINAL_PATH_ATTRIBUTE_NAME = "originalPath";
 
-  @CmdLine(name = "hostname",
-      help = "The hostname to advertise in ZooKeeper instead of the locally-resolved hostname.")
-  private static final Arg<String> HOSTNAME_OVERRIDE = Arg.create(null);
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-hostname",
+        description =
+            "The hostname to advertise in ZooKeeper instead of the locally-resolved hostname.")
+    public String hostnameOverride;
 
-  @Nonnegative
-  @CmdLine(name = "http_port",
-      help = "The port to start an HTTP server on.  Default value will choose a random port.")
-  protected static final Arg<Integer> HTTP_PORT = Arg.create(0);
+    @Parameter(names = "-http_port",
+        description =
+            "The port to start an HTTP server on.  Default value will choose a random port.")
+    public int httpPort = 0;
 
-  @CmdLine(name = "ip",
-      help = "The ip address to listen. If not set, the scheduler will listen on all interfaces.")
-  protected static final Arg<String> LISTEN_IP = Arg.create();
-
-  public static final Map<String, String> GUICE_CONTAINER_PARAMS = ImmutableMap.of(
-      FEATURE_POJO_MAPPING, Boolean.TRUE.toString());
+    @Parameter(names = "-ip",
+        description =
+            "The ip address to listen. If not set, the scheduler will listen on all interfaces.")
+    public String listenIp;
+  }
 
   private static final String STATIC_ASSETS_ROOT = Resource
       .newClassPathResource("scheduler/assets/index.html")
       .toString()
       .replace("assets/index.html", "");
 
+  private final CliOptions options;
   private final boolean production;
 
-  public JettyServerModule() {
-    this(true);
+  public JettyServerModule(CliOptions options) {
+    this(options, true);
   }
 
   @VisibleForTesting
-  JettyServerModule(boolean production) {
+  JettyServerModule(CliOptions options, boolean production) {
+    this.options = options;
     this.production = production;
   }
 
@@ -147,7 +154,8 @@ public class JettyServerModule extends AbstractModule {
         .annotatedWith(Names.named(HealthHandler.HEALTH_CHECKER_KEY))
         .toInstance(Suppliers.ofInstance(true));
 
-    final Optional<String> hostnameOverride = Optional.fromNullable(HOSTNAME_OVERRIDE.get());
+    final Optional<String> hostnameOverride =
+        Optional.ofNullable(options.jetty.hostnameOverride);
     if (hostnameOverride.isPresent()) {
       try {
         InetAddress.getByName(hostnameOverride.get());
@@ -173,28 +181,26 @@ public class JettyServerModule extends AbstractModule {
     SchedulerServicesModule.addAppStartupServiceBinding(binder()).to(RedirectMonitor.class);
 
     if (production) {
-      install(PRODUCTION_SERVLET_CONTEXT_LISTENER);
+      install(new AbstractModule() {
+        @Override
+        protected void configure() {
+          // Provider binding only.
+        }
+
+        @Provides
+        @Singleton
+        ServletContextListener provideServletContextListener(Injector parentInjector) {
+          return makeServletContextListener(
+              parentInjector,
+              (servletContext) -> Modules.combine(
+                  new ApiModule(options.api),
+                  new HttpSecurityModule(options, servletContext),
+                  new ThriftModule(),
+                  new AopModule(options)));
+        }
+      });
     }
   }
-
-  private static final Module PRODUCTION_SERVLET_CONTEXT_LISTENER = new AbstractModule() {
-    @Override
-    protected void configure() {
-      // Provider binding only.
-    }
-
-    @Provides
-    @Singleton
-    ServletContextListener provideServletContextListener(Injector parentInjector) {
-      return makeServletContextListener(
-          parentInjector,
-          Modules.combine(
-              new ApiModule(),
-              new H2ConsoleModule(),
-              new HttpSecurityModule(),
-              new ThriftModule()));
-    }
-  };
 
   private static final Set<String> LEADER_ENDPOINTS = ImmutableSet.of(
       "agents",
@@ -206,6 +212,7 @@ public class JettyServerModule extends AbstractModule {
       "pendingtasks",
       "quotas",
       "slaves",
+      "state",
       "tiers",
       "utilization"
   );
@@ -227,6 +234,7 @@ public class JettyServerModule extends AbstractModule {
           .put(Quotas.class, "quotas")
           .put(Services.class, "services")
           .put(StructDump.class, "structdump")
+          .put(State.class, "state")
           .put(ThreadStackPrinter.class, "threads")
           .put(Tiers.class, "tiers")
           .put(TimeSeriesDataSource.class, "graphdata")
@@ -244,15 +252,15 @@ public class JettyServerModule extends AbstractModule {
   // TODO(ksweeney): Factor individual servlet configurations to their own ServletModules.
   @VisibleForTesting
   static ServletContextListener makeServletContextListener(
-      final Injector parentInjector,
-      final Module childModule) {
+      Injector parentInjector,
+      Function<ServletContext, Module> childModuleFactory) {
 
-    return new GuiceServletContextListener() {
+    ServletContextListener contextListener = new GuiceResteasyBootstrapServletContextListener() {
       @Override
-      protected Injector getInjector() {
-        return parentInjector.createChildInjector(
-            childModule,
-            new JerseyServletModule() {
+      protected List<? extends Module> getModules(ServletContext context) {
+        return ImmutableList.of(
+            childModuleFactory.apply(context),
+            new ServletModule() {
               @Override
               protected void configureServlets() {
                 bind(HttpStatsFilter.class).in(Singleton.class);
@@ -262,14 +270,11 @@ public class JettyServerModule extends AbstractModule {
                 filterRegex(allOf(LEADER_ENDPOINTS))
                     .through(LeaderRedirectFilter.class);
 
-                bind(GuiceContainer.class).in(Singleton.class);
-                filterRegex(allOf(ImmutableSet.copyOf(JAX_RS_ENDPOINTS.values())))
-                    .through(GuiceContainer.class, GUICE_CONTAINER_PARAMS);
-
                 filterRegex("/assets/scheduler(?:/.*)?").through(LeaderRedirectFilter.class);
 
                 serve("/assets", "/assets/*")
                     .with(new DefaultServlet(), ImmutableMap.of(
+                        "cacheControl", "max-age=3600",
                         "resourceBase", STATIC_ASSETS_ROOT,
                         "dirAllowed", "false"));
 
@@ -277,9 +282,15 @@ public class JettyServerModule extends AbstractModule {
                   bind(jaxRsHandler);
                 }
               }
-            });
+            }
+        );
       }
     };
+
+    // Injects the Injector into GuiceResteasyBootstrapServletContextListener.
+    parentInjector.injectMembers(contextListener);
+
+    return contextListener;
   }
 
   static class RedirectMonitor extends AbstractIdleService {
@@ -302,6 +313,7 @@ public class JettyServerModule extends AbstractModule {
   }
 
   public static final class HttpServerLauncher extends AbstractIdleService implements HttpService {
+    private final CliOptions options;
     private final ServletContextListener servletContextListener;
     private final Optional<String> advertisedHostOverride;
     private volatile Server server;
@@ -309,9 +321,11 @@ public class JettyServerModule extends AbstractModule {
 
     @Inject
     HttpServerLauncher(
+        CliOptions options,
         ServletContextListener servletContextListener,
         Optional<String> advertisedHostOverride) {
 
+      this.options = requireNonNull(options);
       this.servletContextListener = requireNonNull(servletContextListener);
       this.advertisedHostOverride = requireNonNull(advertisedHostOverride);
     }
@@ -354,7 +368,7 @@ public class JettyServerModule extends AbstractModule {
     public HostAndPort getAddress() {
       Preconditions.checkState(state() == State.RUNNING);
       return HostAndPort.fromParts(
-          advertisedHostOverride.or(serverAddress.getHost()),
+          advertisedHostOverride.orElse(serverAddress.getHost()),
           serverAddress.getPort());
     }
 
@@ -367,6 +381,7 @@ public class JettyServerModule extends AbstractModule {
       servletHandler.addServlet(DefaultServlet.class, "/");
       servletHandler.addFilter(GuiceFilter.class, "/*", EnumSet.allOf(DispatcherType.class));
       servletHandler.addEventListener(servletContextListener);
+      servletHandler.addServlet(HttpServletDispatcher.class, "/*");
 
       HandlerCollection rootHandler = new HandlerList();
 
@@ -377,9 +392,9 @@ public class JettyServerModule extends AbstractModule {
       rootHandler.addHandler(servletHandler);
 
       ServerConnector connector = new ServerConnector(server);
-      connector.setPort(HTTP_PORT.get());
-      if (LISTEN_IP.hasAppliedValue()) {
-        connector.setHost(LISTEN_IP.get());
+      connector.setPort(options.jetty.httpPort);
+      if (options.jetty.listenIp != null) {
+        connector.setHost(options.jetty.listenIp);
       }
 
       server.addConnector(connector);

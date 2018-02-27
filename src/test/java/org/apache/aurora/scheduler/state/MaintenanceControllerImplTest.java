@@ -13,16 +13,18 @@
  */
 package org.apache.aurora.scheduler.state;
 
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 
+import org.apache.aurora.common.quantity.Amount;
+import org.apache.aurora.common.quantity.Time;
 import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.gen.HostAttributes;
@@ -44,6 +46,7 @@ import org.apache.aurora.scheduler.storage.entities.IHostStatus;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
 import org.apache.aurora.scheduler.testing.FakeStatsProvider;
+import org.apache.mesos.v1.Protos;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -62,6 +65,33 @@ public class MaintenanceControllerImplTest extends EasyMockTest {
 
   private static final String HOST_A = "a";
   private static final Set<String> A = ImmutableSet.of(HOST_A);
+  private static final Protos.OfferID OFFER_ID = Protos.OfferID.newBuilder()
+      .setValue("offer-id")
+      .build();
+  private static final Protos.AgentID AGENT_ID = Protos.AgentID.newBuilder()
+      .setValue("agent-id")
+      .build();
+  private static final Protos.FrameworkID FRAMEWORK_ID = Protos.FrameworkID.newBuilder()
+      .setValue("framework-id")
+      .build();
+  private static final Protos.URL AGENT_URL = Protos.URL.newBuilder()
+      .setAddress(Protos.Address.newBuilder()
+          .setHostname(HOST_A)
+          .setPort(5051))
+      .setScheme("http")
+      .build();
+  private static final Protos.Unavailability UNAVAILABILITY = Protos.Unavailability.newBuilder()
+      .setStart(Protos.TimeInfo.newBuilder()
+          .setNanoseconds(Amount.of(1L, Time.MINUTES).as(Time.NANOSECONDS)))
+      .build();
+
+  private static final Protos.InverseOffer INVERSE_OFFER = Protos.InverseOffer.newBuilder()
+      .setId(OFFER_ID)
+      .setAgentId(AGENT_ID)
+      .setUrl(AGENT_URL)
+      .setFrameworkId(FRAMEWORK_ID)
+      .setUnavailability(UNAVAILABILITY)
+      .build();
 
   private StorageTestUtil storageUtil;
   private StateManager stateManager;
@@ -143,7 +173,7 @@ public class MaintenanceControllerImplTest extends EasyMockTest {
   @Test
   public void testUnknownHost() {
     expect(storageUtil.attributeStore.getHostAttributes("b"))
-        .andReturn(Optional.absent());
+        .andReturn(Optional.empty());
 
     control.replay();
 
@@ -187,7 +217,7 @@ public class MaintenanceControllerImplTest extends EasyMockTest {
   public void testGetMode() {
     expect(storageUtil.attributeStore.getHostAttributes(HOST_A)).andReturn(Optional.of(
         IHostAttributes.build(new HostAttributes().setHost(HOST_A).setMode(DRAINING))));
-    expect(storageUtil.attributeStore.getHostAttributes("unknown")).andReturn(Optional.absent());
+    expect(storageUtil.attributeStore.getHostAttributes("unknown")).andReturn(Optional.empty());
 
     control.replay();
 
@@ -195,11 +225,21 @@ public class MaintenanceControllerImplTest extends EasyMockTest {
     assertEquals(NONE, maintenance.getMode("unknown"));
   }
 
+  @Test
+  public void testInverseOfferDrain() {
+    IScheduledTask task1 = makeTask(HOST_A, "taskA");
+    expectFetchTasksByHost(HOST_A, ImmutableSet.of(task1));
+    expectTaskDraining(task1);
+
+    control.replay();
+    maintenance.drainForInverseOffer(INVERSE_OFFER);
+  }
+
   private void expectTaskDraining(IScheduledTask task) {
     expect(stateManager.changeState(
         storageUtil.mutableStoreProvider,
         Tasks.id(task),
-        Optional.absent(),
+        Optional.empty(),
         ScheduleStatus.DRAINING,
         MaintenanceControllerImpl.DRAINING_MESSAGE))
         .andReturn(StateChangeResult.SUCCESS);

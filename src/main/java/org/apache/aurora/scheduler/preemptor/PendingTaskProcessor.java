@@ -19,6 +19,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import javax.inject.Inject;
@@ -27,7 +28,6 @@ import javax.inject.Qualifier;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
@@ -49,11 +49,11 @@ import org.apache.aurora.common.inject.TimedInterceptor.Timed;
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
 import org.apache.aurora.common.util.Clock;
-import org.apache.aurora.scheduler.HostOffer;
 import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.filter.AttributeAggregate;
+import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.StoreProvider;
@@ -143,7 +143,7 @@ public class PendingTaskProcessor implements Runnable {
 
       // Group the offers by slave id so they can be paired with active tasks from the same slave.
       Map<String, HostOffer> slavesToOffers =
-          Maps.uniqueIndex(offerManager.getOffers(), OFFER_TO_SLAVE_ID);
+          Maps.uniqueIndex(offerManager.getAll(), OFFER_TO_SLAVE_ID);
 
       Set<String> allSlaves = Sets.newHashSet(Iterables.concat(
           slavesToOffers.keySet(),
@@ -179,7 +179,7 @@ public class PendingTaskProcessor implements Runnable {
                   task,
                   slavesToActiveTasks.get(slaveId),
                   jobStates.getUnchecked(task.getJob()),
-                  Optional.fromNullable(slavesToOffers.get(slaveId)),
+                  Optional.ofNullable(slavesToOffers.get(slaveId)),
                   store);
 
           metrics.recordSlotSearchResult(candidates, task);
@@ -273,5 +273,5 @@ public class PendingTaskProcessor implements Runnable {
   };
 
   private static final Function<HostOffer, String> OFFER_TO_SLAVE_ID =
-      offer -> offer.getOffer().getSlaveId().getValue();
+      offer -> offer.getOffer().getAgentId().getValue();
 }

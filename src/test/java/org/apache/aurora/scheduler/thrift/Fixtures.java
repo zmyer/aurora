@@ -15,11 +15,11 @@ package org.apache.aurora.scheduler.thrift;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -35,7 +35,6 @@ import org.apache.aurora.gen.JobConfiguration;
 import org.apache.aurora.gen.JobSummary;
 import org.apache.aurora.gen.JobSummaryResult;
 import org.apache.aurora.gen.JobUpdateKey;
-import org.apache.aurora.gen.LockKey;
 import org.apache.aurora.gen.MesosContainer;
 import org.apache.aurora.gen.Resource;
 import org.apache.aurora.gen.Response;
@@ -52,7 +51,6 @@ import org.apache.aurora.scheduler.resources.ResourceBag;
 import org.apache.aurora.scheduler.resources.ResourceTestUtil;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateKey;
-import org.apache.aurora.scheduler.storage.entities.ILockKey;
 import org.apache.aurora.scheduler.storage.entities.IResult;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 
@@ -67,7 +65,6 @@ final class Fixtures {
   static final Identity IDENTITY = new Identity().setUser(USER);
   static final String JOB_NAME = "job_foo";
   static final IJobKey JOB_KEY = JobKeys.from(ROLE, "devel", JOB_NAME);
-  static final ILockKey LOCK_KEY = ILockKey.build(LockKey.job(JOB_KEY.newBuilder()));
   static final JobConfiguration CRON_JOB = makeJob().setCronSchedule("* * * * *");
   static final String TASK_ID = "task_id";
   static final String UPDATE_ID = "82d6d790-3212-11e3-aa6e-0800200c9a74";
@@ -105,12 +102,8 @@ final class Fixtures {
         .setOwner(IDENTITY)
         .setContactEmail("testing@twitter.com")
         .setExecutorConfig(new ExecutorConfig(apiConstants.AURORA_EXECUTOR_NAME, "data"))
-        .setNumCpus(1)
-        .setRamMb(1024)
-        .setDiskMb(1024)
         .setProduction(production)
         .setTier(production ? TaskTestUtil.PROD_TIER_NAME : TaskTestUtil.DEV_TIER_NAME)
-        .setRequestedPorts(ImmutableSet.of())
         .setTaskLinks(ImmutableMap.of())
         .setMaxTaskFailures(1)
         .setConstraints(ImmutableSet.of())
@@ -134,7 +127,7 @@ final class Fixtures {
   static Response response(ResponseCode code, Optional<Result> result, String... messages) {
     Response response = Responses.empty()
         .setResponseCode(code)
-        .setResult(result.orNull());
+        .setResult(result.orElse(null));
     if (messages.length > 0) {
       response.setDetails(FluentIterable.from(Arrays.asList(messages)).transform(MESSAGE_TO_DETAIL)
           .toList());

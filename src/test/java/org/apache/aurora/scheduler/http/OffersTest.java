@@ -25,10 +25,10 @@ import com.hubspot.jackson.datatype.protobuf.ProtobufModule;
 
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.gen.HostAttributes;
-import org.apache.aurora.scheduler.HostOffer;
+import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
-import org.apache.mesos.Protos;
+import org.apache.mesos.v1.Protos;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -49,7 +49,7 @@ public class OffersTest extends EasyMockTest {
 
   @Test
   public void testNoOffers() throws Exception {
-    expect(offerManager.getOffers()).andReturn(ImmutableSet.of());
+    expect(offerManager.getAll()).andReturn(ImmutableSet.of());
 
     control.replay();
 
@@ -64,7 +64,7 @@ public class OffersTest extends EasyMockTest {
         Protos.Offer.newBuilder()
             .setId(Protos.OfferID.newBuilder().setValue("offer_id"))
             .setFrameworkId(Protos.FrameworkID.newBuilder().setValue("framework_id"))
-            .setSlaveId(Protos.SlaveID.newBuilder().setValue("slave_id"))
+            .setAgentId(Protos.AgentID.newBuilder().setValue("slave_id"))
             .setHostname("host_name")
             .addResources(Protos.Resource.newBuilder()
                 .setName("cpus")
@@ -134,7 +134,7 @@ public class OffersTest extends EasyMockTest {
             .build(),
         IHostAttributes.build(new HostAttributes().setMode(NONE)));
 
-    expect(offerManager.getOffers()).andReturn(ImmutableSet.of(offer));
+    expect(offerManager.getAll()).andReturn(ImmutableSet.of(offer));
 
     control.replay();
 

@@ -17,7 +17,6 @@ import java.util.List;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.aurora.gen.AppcImage;
@@ -45,6 +44,7 @@ import org.apache.aurora.scheduler.configuration.ConfigurationManager.Configurat
 import org.apache.aurora.scheduler.configuration.ConfigurationManager.TaskDescriptionException;
 import org.apache.aurora.scheduler.mesos.TestExecutorSettings;
 import org.apache.aurora.scheduler.storage.entities.IDockerParameter;
+import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
 import org.junit.Rule;
 import org.junit.Test;
@@ -87,15 +87,11 @@ public class ConfigurationManagerTest {
               .setIsService(false)
               .setTaskLinks(ImmutableMap.of())
               .setExecutorConfig(new ExecutorConfig(apiConstants.AURORA_EXECUTOR_NAME, "config"))
-              .setRequestedPorts(ImmutableSet.of())
               .setPriority(0)
               .setOwner(null)
               .setContactEmail("foo@twitter.com")
               .setProduction(false)
-              .setDiskMb(1)
               .setMetadata(null)
-              .setNumCpus(1.0)
-              .setRamMb(1)
               .setMaxTaskFailures(0)
               .setConstraints(
                   ImmutableSet.of(
@@ -125,11 +121,12 @@ public class ConfigurationManagerTest {
       new ConfigurationManagerSettings(
           ALL_CONTAINER_TYPES,
           false,
-          ImmutableMultimap.of(),
+          ImmutableList.of(),
           true,
           false,
           true,
-          false),
+          false,
+          ConfigurationManager.DEFAULT_ALLOWED_JOB_ENVIRONMENTS),
       TaskTestUtil.TIER_MANAGER,
       TaskTestUtil.THRIFT_BACKFILL,
       TestExecutorSettings.THERMOS_EXECUTOR);
@@ -137,11 +134,12 @@ public class ConfigurationManagerTest {
       new ConfigurationManagerSettings(
           ALL_CONTAINER_TYPES,
           true,
-          ImmutableMultimap.of("foo", "bar"),
+          ImmutableList.of(new DockerParameter("foo", "bar")),
           false,
           true,
           true,
-          true),
+          true,
+          ConfigurationManager.DEFAULT_ALLOWED_JOB_ENVIRONMENTS),
       TaskTestUtil.TIER_MANAGER,
       TaskTestUtil.THRIFT_BACKFILL,
       TestExecutorSettings.THERMOS_EXECUTOR);
@@ -263,17 +261,6 @@ public class ConfigurationManagerTest {
   }
 
   @Test
-  public void testTaskResourceBackfill() throws Exception {
-    TaskConfig builder = CONFIG_WITH_CONTAINER.newBuilder();
-    builder.unsetResources();
-
-    assertFalse(builder.isSetResources());
-    ITaskConfig populated =
-        DOCKER_CONFIGURATION_MANAGER.validateAndPopulate(ITaskConfig.build(builder));
-    assertEquals(CONFIG_WITH_CONTAINER.getResources(), populated.getResources());
-  }
-
-  @Test
   public void testMultipleResourceValuesBlocked() throws Exception {
     TaskConfig builder = CONFIG_WITH_CONTAINER.newBuilder();
     builder.addToResources(numCpus(3.0));
@@ -301,11 +288,12 @@ public class ConfigurationManagerTest {
         new ConfigurationManagerSettings(
             ALL_CONTAINER_TYPES,
             true,
-            ImmutableMultimap.of("foo", "bar"),
+            ImmutableList.of(new DockerParameter("foo", "bar")),
             false,
             false,
             false,
-            false),
+            false,
+            ConfigurationManager.DEFAULT_ALLOWED_JOB_ENVIRONMENTS),
         TaskTestUtil.TIER_MANAGER,
         TaskTestUtil.THRIFT_BACKFILL,
         TestExecutorSettings.THERMOS_EXECUTOR).validateAndPopulate(ITaskConfig.build(builder));
@@ -324,11 +312,12 @@ public class ConfigurationManagerTest {
             new ConfigurationManagerSettings(
                     ALL_CONTAINER_TYPES,
                     true,
-                    ImmutableMultimap.of("foo", "bar"),
+                ImmutableList.of(new DockerParameter("foo", "bar")),
                     false,
                     false,
                     false,
-                    false),
+                    false,
+                    ".+"),
             TaskTestUtil.TIER_MANAGER,
             TaskTestUtil.THRIFT_BACKFILL,
             TestExecutorSettings.THERMOS_EXECUTOR).validateAndPopulate(ITaskConfig.build(builder));
@@ -356,6 +345,27 @@ public class ConfigurationManagerTest {
     ITaskConfig populated =
         DOCKER_CONFIGURATION_MANAGER.validateAndPopulate(ITaskConfig.build(builder));
     assertEquals(ImmutableSet.of("health", "http"), populated.getTaskLinks().keySet());
+  }
+
+  @Test
+  public void testJobEnvironmentValidation() throws Exception {
+    JobConfiguration jobConfiguration = UNSANITIZED_JOB_CONFIGURATION.deepCopy();
+    jobConfiguration.getKey().setEnvironment("foo");
+    expectTaskDescriptionException("Job environment foo doesn't match: b.r");
+    new ConfigurationManager(
+      new ConfigurationManagerSettings(
+          ALL_CONTAINER_TYPES,
+          true,
+          ImmutableList.of(new DockerParameter("foo", "bar")),
+          false,
+          true,
+          true,
+          true,
+          "b.r"),
+      TaskTestUtil.TIER_MANAGER,
+      TaskTestUtil.THRIFT_BACKFILL,
+      TestExecutorSettings.THERMOS_EXECUTOR)
+            .validateAndPopulate(IJobConfiguration.build(jobConfiguration));
   }
 
   private void expectTaskDescriptionException(String message) {

@@ -13,10 +13,11 @@
  */
 package org.apache.aurora.scheduler.mesos;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
+import java.util.Optional;
 
-import org.apache.mesos.Protos;
+import com.google.common.annotations.VisibleForTesting;
+
+import org.apache.mesos.v1.Protos;
 
 import static java.util.Objects.requireNonNull;
 
@@ -27,16 +28,13 @@ import static java.util.Objects.requireNonNull;
 public class DriverSettings {
   private final String masterUri;
   private final Optional<Protos.Credential> credentials;
-  private final Protos.FrameworkInfo frameworkInfo;
 
   public DriverSettings(
       String masterUri,
-      Optional<Protos.Credential> credentials,
-      Protos.FrameworkInfo frameworkInfo) {
+      Optional<Protos.Credential> credentials) {
 
     this.masterUri = requireNonNull(masterUri);
     this.credentials = requireNonNull(credentials);
-    this.frameworkInfo = requireNonNull(frameworkInfo);
   }
 
   public String getMasterUri() {
@@ -45,9 +43,5 @@ public class DriverSettings {
 
   public Optional<Protos.Credential> getCredentials() {
     return credentials;
-  }
-
-  public Protos.FrameworkInfo getFrameworkInfo() {
-    return frameworkInfo;
   }
 }

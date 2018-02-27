@@ -21,7 +21,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.FluentIterable;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
@@ -34,7 +33,6 @@ import org.apache.aurora.scheduler.resources.ResourceTestUtil;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.junit.Before;
 import org.junit.Test;
@@ -56,7 +54,7 @@ public class StorageTransactionTest extends TearDownTestCase {
     executor = Executors.newCachedThreadPool(
         new ThreadFactoryBuilder().setNameFormat("SlowRead-%d").setDaemon(true).build());
     addTearDown(() -> MoreExecutors.shutdownAndAwaitTermination(executor, 1, TimeUnit.SECONDS));
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
   }
 
   @Test
@@ -124,9 +122,9 @@ public class StorageTransactionTest extends TearDownTestCase {
     }
 
     storage.read(storeProvider -> {
-      // If the previous write was under a transaction then there would be no quota records.
-      assertEquals(ImmutableMap.of(),
-          storeProvider.getQuotaStore().fetchQuotas());
+      // Since the previous write was not transactional, the quota record remains.
+      assertEquals(ImmutableSet.of("a"),
+          storeProvider.getQuotaStore().fetchQuotas().keySet());
       return null;
     });
   }
@@ -137,7 +135,9 @@ public class StorageTransactionTest extends TearDownTestCase {
       storeProvider.getUnsafeTaskStore().saveTasks(ImmutableSet.of(makeTask("a"), makeTask("b")));
       throw new CustomException();
     });
-    expectTasks();
+    // The in-memory storage is not transactional, so the writes are retained despite the write
+    // operation failing.
+    expectTasks("a", "b");
 
     storage.write((NoResult.Quiet) storeProvider ->
         storeProvider.getUnsafeTaskStore().saveTasks(
@@ -148,7 +148,7 @@ public class StorageTransactionTest extends TearDownTestCase {
       storeProvider.getUnsafeTaskStore().deleteAllTasks();
       throw new CustomException();
     });
-    expectTasks("a", "b");
+    expectTasks();
 
     storage.write(
         (NoResult.Quiet) storeProvider -> storeProvider.getUnsafeTaskStore().deleteAllTasks());
@@ -157,7 +157,7 @@ public class StorageTransactionTest extends TearDownTestCase {
       storeProvider.getUnsafeTaskStore().saveTasks(ImmutableSet.of(makeTask("a")));
       throw new CustomException();
     });
-    expectTasks();
+    expectTasks("a");
 
     storage.write((NoResult.Quiet) storeProvider ->
         storeProvider.getUnsafeTaskStore().saveTasks(ImmutableSet.of(makeTask("a"))));
@@ -170,7 +170,7 @@ public class StorageTransactionTest extends TearDownTestCase {
         throw new CustomException();
       });
     });
-    expectTasks("a");
+    expectTasks("a", "c", "d");
 
     // Nested transaction where outer transaction fails.
     expectWriteFail(storeProvider -> {
@@ -179,6 +179,6 @@ public class StorageTransactionTest extends TearDownTestCase {
           storeProvider1.getUnsafeTaskStore().saveTasks(ImmutableSet.of(makeTask("d"))));
       throw new CustomException();
     });
-    expectTasks("a");
+    expectTasks("a", "c", "d");
   }
 }

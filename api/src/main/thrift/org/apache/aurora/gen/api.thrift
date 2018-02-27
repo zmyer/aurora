@@ -27,8 +27,8 @@ enum ResponseCode {
   ERROR           = 2,
   WARNING         = 3,
   AUTH_FAILED     = 4,
-  /** Raised when a Lock-protected operation failed due to lock validation. */
-  LOCK_ERROR      = 5,
+  /** Raised when an operation was unable to proceed due to an in-progress job update. */
+  JOB_UPDATING_ERROR = 5,
   /** Raised when a scheduler is transiently unavailable and later retry is recommended. */
   ERROR_TRANSIENT = 6
 }
@@ -115,11 +115,13 @@ struct JobKey {
   3: string name
 }
 
+// TODO(jly): Deprecated, remove in 0.21. See AURORA-1959.
 /** A unique lock key. */
 union LockKey {
   1: JobKey job
 }
 
+// TODO(jly): Deprecated, remove in 0.21. See AURORA-1959.
 /** A generic lock struct to facilitate context specific resource/operation serialization. */
 struct Lock {
   /** ID of the lock - unique per storage */
@@ -238,6 +240,11 @@ union Resource {
   5: i64 numGpus
 }
 
+struct PartitionPolicy {
+  1: bool reschedule
+  2: optional i64 delaySecs
+}
+
 /** Description of the tasks contained within a job. */
 struct TaskConfig {
  /** Job task belongs to. */
@@ -246,12 +253,6 @@ struct TaskConfig {
  /** contains the role component of JobKey */
  17: Identity owner
   7: bool isService
-  // TODO(maxim): Deprecated. See AURORA-1707.
-  8: double numCpus
-  // TODO(maxim): Deprecated. See AURORA-1707.
-  9: i64 ramMb
-  // TODO(maxim): Deprecated. See AURORA-1707.
- 10: i64 diskMb
  11: i32 priority
  13: i32 maxTaskFailures
  // TODO(mnurolahzade): Deprecated. See AURORA-1708.
@@ -263,8 +264,6 @@ struct TaskConfig {
  32: set<Resource> resources
 
  20: set<Constraint> constraints
- /** a list of named ports this task requests */
- 21: set<string> requestedPorts
  /** Resources to retrieve with Mesos Fetcher */
  33: optional set<MesosFetcherURI> mesosFetcherUris
  /**
@@ -278,6 +277,8 @@ struct TaskConfig {
  25: optional ExecutorConfig executorConfig
  /** Used to display additional details in the UI. */
  27: optional set<Metadata> metadata
+ /** Policy for how to deal with task partitions */
+ 34: optional PartitionPolicy partitionPolicy
 
  // This field is deliberately placed at the end to work around a bug in the immutable wrapper
  // code generator.  See AURORA-1185 for details.
@@ -422,7 +423,11 @@ enum ScheduleStatus {
   /** A fault in the task environment has caused the system to believe the task no longer exists.
    * This can happen, for example, when a slave process disappears.
    */
-  LOST             = 7
+  LOST             = 7,
+  /**
+   * The task is currently partitioned and in an unknown state.
+   **/
+  PARTITIONED      = 18
 }
 
 // States that a task may be in while still considered active.
@@ -434,6 +439,7 @@ const set<ScheduleStatus> ACTIVE_STATES = [ScheduleStatus.ASSIGNED,
                                            ScheduleStatus.RESTARTING
                                            ScheduleStatus.RUNNING,
                                            ScheduleStatus.STARTING,
+                                           ScheduleStatus.PARTITIONED,
                                            ScheduleStatus.THROTTLED]
 
 // States that a task may be in while associated with a slave machine and non-terminal.
@@ -443,6 +449,7 @@ const set<ScheduleStatus> SLAVE_ASSIGNED_STATES = [ScheduleStatus.ASSIGNED,
                                                    ScheduleStatus.PREEMPTING,
                                                    ScheduleStatus.RESTARTING,
                                                    ScheduleStatus.RUNNING,
+                                                   ScheduleStatus.PARTITIONED,
                                                    ScheduleStatus.STARTING]
 
 // States that a task may be in while in an active sandbox.
@@ -450,6 +457,7 @@ const set<ScheduleStatus> LIVE_STATES = [ScheduleStatus.KILLING,
                                          ScheduleStatus.PREEMPTING,
                                          ScheduleStatus.RESTARTING,
                                          ScheduleStatus.DRAINING,
+                                         ScheduleStatus.PARTITIONED,
                                          ScheduleStatus.RUNNING]
 
 // States a completed task may be in.
@@ -518,6 +526,11 @@ struct ScheduledTask {
    * this task.
    */
   3: i32 failureCount
+  /**
+   * The number of partitions this task has accumulated over its lifetime.
+   */
+  6: i32 timesPartitioned
+
   /** State change history for this task. */
   4: list<TaskEvent> taskEvents
   /**
@@ -619,6 +632,9 @@ const set<JobUpdateStatus> ACTIVE_JOB_UPDATE_STATES = [JobUpdateStatus.ROLLING_F
                                                        JobUpdateStatus.ROLL_BACK_PAUSED,
                                                        JobUpdateStatus.ROLL_FORWARD_AWAITING_PULSE,
                                                        JobUpdateStatus.ROLL_BACK_AWAITING_PULSE]
+/** States the job update can be in while waiting for a pulse. */
+const set<JobUpdateStatus> AWAITNG_PULSE_JOB_UPDATE_STATES = [JobUpdateStatus.ROLL_FORWARD_AWAITING_PULSE,
+                                                              JobUpdateStatus.ROLL_BACK_AWAITING_PULSE]
 
 /** Job update actions that can be applied to job instances. */
 enum JobUpdateAction {
@@ -1075,7 +1091,7 @@ service AuroraSchedulerManager extends ReadOnlyScheduler {
   Response restartShards(5: JobKey job, 3: set<i32> shardIds)
 
   /** Initiates a kill on tasks. */
-  Response killTasks(4: JobKey job, 5: set<i32> instances)
+  Response killTasks(4: JobKey job, 5: set<i32> instances, 6: string message)
 
   /**
    * Adds new instances with the TaskConfig of the existing instance pointed by the key.
@@ -1136,31 +1152,6 @@ service AuroraSchedulerManager extends ReadOnlyScheduler {
   Response pulseJobUpdate(1: JobUpdateKey key)
 }
 
-struct InstanceConfigRewrite {
-  /** Key for the task to rewrite. */
-  1: InstanceKey instanceKey
-  /** The original configuration. */
-  2: TaskConfig oldTask
-  /** The rewritten configuration. */
-  3: TaskConfig rewrittenTask
-}
-
-struct JobConfigRewrite {
-  /** The original job configuration. */
-  1: JobConfiguration oldJob
-  /** The rewritten job configuration. */
-  2: JobConfiguration rewrittenJob
-}
-
-union ConfigRewrite {
-  1: JobConfigRewrite jobRewrite
-  2: InstanceConfigRewrite instanceRewrite
-}
-
-struct RewriteConfigsRequest {
-  1: list<ConfigRewrite> rewriteCommands
-}
-
 struct ExplicitReconciliationSettings {
   1: optional i32 batchSize
 }
@@ -1216,20 +1207,18 @@ service AuroraAdmin extends AuroraSchedulerManager {
   /** Start a storage snapshot and block until it completes. */
   Response snapshot()
 
-  /**
-   * Forcibly rewrites the stored definition of user configurations.  This is intended to be used
-   * in a controlled setting, primarily to migrate pieces of configurations that are opaque to the
-   * scheduler (e.g. executorConfig).
-   * The scheduler may do some validation of the rewritten configurations, but it is important
-   * that the caller take care to provide valid input and alter only necessary fields.
-   */
-  Response rewriteConfigs(1: RewriteConfigsRequest request)
-
   /** Tell scheduler to trigger an explicit task reconciliation with the given settings. */
   Response triggerExplicitTaskReconciliation(1: ExplicitReconciliationSettings settings)
 
   /** Tell scheduler to trigger an implicit task reconciliation. */
   Response triggerImplicitTaskReconciliation()
+
+  /**
+   * Force prune any (terminal) tasks that match the query. If no statuses are supplied with the
+   * query, it will default to all terminal task states. If statuses are supplied, they must be
+   * terminal states.
+   */
+  Response pruneTasks(1: TaskQuery query)
 }
 
 // The name of the header that should be sent to bypass leader redirection in the Scheduler.

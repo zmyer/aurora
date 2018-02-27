@@ -16,29 +16,28 @@ package org.apache.aurora.scheduler.events;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.io.Files;
-import com.google.common.io.Resources;
 import com.google.inject.AbstractModule;
-
 import com.google.inject.Singleton;
 
-import org.apache.aurora.common.args.Arg;
-import org.apache.aurora.common.args.CmdLine;
-import org.apache.aurora.common.args.constraints.CanRead;
-import org.apache.aurora.common.args.constraints.Exists;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.conn.ConnectionKeepAliveStrategy;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
-import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.aurora.scheduler.SchedulerServicesModule;
+import org.apache.aurora.scheduler.config.validators.ReadableFile;
+import org.asynchttpclient.AsyncHttpClient;
+import org.asynchttpclient.DefaultAsyncHttpClientConfig;
+import org.asynchttpclient.channel.DefaultKeepAliveStrategy;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkArgument;
+
+import static org.asynchttpclient.Dsl.asyncHttpClient;
 
 /**
  * Binding module for webhook management.
@@ -50,58 +49,53 @@ public class WebhookModule extends AbstractModule {
   @VisibleForTesting
   static final String WEBHOOK_CONFIG_PATH = "org/apache/aurora/scheduler/webhook.json";
 
-  @CmdLine(name = "webhook_config", help = "Path to webhook configuration file.")
-  @Exists
-  @CanRead
-  private static final Arg<File> WEBHOOK_CONFIG_FILE = Arg.create();
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-webhook_config",
+        validateValueWith = ReadableFile.class,
+        description = "Path to webhook configuration file.")
+    public File webhookConfigFile = null;
+  }
 
-  private final boolean enableWebhook;
+  private final Optional<String> webhookConfig;
 
-  public WebhookModule() {
-    this(WEBHOOK_CONFIG_FILE.hasAppliedValue());
+  public WebhookModule(Options options) {
+    this.webhookConfig = Optional.ofNullable(options.webhookConfigFile)
+        .map(f -> {
+          try {
+            return Files.asCharSource(options.webhookConfigFile, StandardCharsets.UTF_8).read();
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
   }
 
   @VisibleForTesting
-  private WebhookModule(boolean enableWebhook) {
-    this.enableWebhook = enableWebhook;
+  WebhookModule(Optional<String> webhookConfig) {
+    this.webhookConfig = webhookConfig;
   }
 
   @Override
   protected void configure() {
-    if (enableWebhook) {
-      WebhookInfo webhookInfo = parseWebhookConfig(readWebhookFile());
-      int timeout = webhookInfo.getConnectonTimeoutMsec();
-      RequestConfig config = RequestConfig.custom()
-          .setConnectTimeout(timeout) // establish connection with server eg time to TCP handshake.
-          .setConnectionRequestTimeout(timeout)  // get a connection from internal pool.
-          .setSocketTimeout(timeout) // wait for data after connection was established.
+    if (webhookConfig.isPresent()) {
+      WebhookInfo webhookInfo = parseWebhookConfig(webhookConfig.get());
+      DefaultAsyncHttpClientConfig config = new DefaultAsyncHttpClientConfig.Builder()
+          .setConnectTimeout(webhookInfo.getConnectonTimeoutMsec())
+          .setHandshakeTimeout(webhookInfo.getConnectonTimeoutMsec())
+          .setSslSessionTimeout(webhookInfo.getConnectonTimeoutMsec())
+          .setReadTimeout(webhookInfo.getConnectonTimeoutMsec())
+          .setRequestTimeout(webhookInfo.getConnectonTimeoutMsec())
+          .setKeepAliveStrategy(new DefaultKeepAliveStrategy())
           .build();
-      ConnectionKeepAliveStrategy connectionStrategy = new DefaultConnectionKeepAliveStrategy();
-      CloseableHttpClient client =
-          HttpClientBuilder.create()
-              .setDefaultRequestConfig(config)
-              // being explicit about using default Keep-Alive strategy.
-              .setKeepAliveStrategy(connectionStrategy)
-              .build();
+      AsyncHttpClient httpClient = asyncHttpClient(config);
 
       bind(WebhookInfo.class).toInstance(webhookInfo);
-      bind(CloseableHttpClient.class).toInstance(client);
+      bind(AsyncHttpClient.class).toInstance(httpClient);
       PubsubEventModule.bindSubscriber(binder(), Webhook.class);
       bind(Webhook.class).in(Singleton.class);
-    }
-  }
 
-  @VisibleForTesting
-  static String readWebhookFile() {
-    try {
-      return WEBHOOK_CONFIG_FILE.hasAppliedValue()
-          ? Files.toString(WEBHOOK_CONFIG_FILE.get(), StandardCharsets.UTF_8)
-          : Resources.toString(
-              Webhook.class.getClassLoader().getResource(WEBHOOK_CONFIG_PATH),
-              StandardCharsets.UTF_8);
-    } catch (IOException e) {
-      LOG.error("Error loading webhook configuration file.");
-      throw new RuntimeException(e);
+      SchedulerServicesModule.addSchedulerActiveServiceBinding(binder())
+          .to(Webhook.class);
     }
   }
 

@@ -44,7 +44,7 @@ behavior with its optional attributes. Remember, Processes are handled by Thermo
    **max_failures**   | Integer     | Maximum process failures (Default: 1)
    **daemon**         | Boolean     | When True, this is a daemon process. (Default: False)
    **ephemeral**      | Boolean     | When True, this is an ephemeral process. (Default: False)
-   **min_duration**   | Integer     | Minimum duration between process restarts in seconds. (Default: 15)
+   **min_duration**   | Integer     | Minimum duration between process restarts in seconds. (Default: 5)
    **final**          | Boolean     | When True, this process is a finalizing one that should run last. (Default: False)
    **logger**         | Logger      | Struct defining the log behavior for the process. (Default: Empty)
 
@@ -339,7 +339,7 @@ Job Schema
   ```name``` | String | Job name. (Default: inherited from the task attribute's name)
   ```role``` | String | Job role account. Required.
   ```cluster``` | String | Cluster in which this job is scheduled. Required.
-  ```environment``` | String | Job environment, default ```devel```. Must be one of ```prod```, ```devel```, ```test``` or ```staging<number>```.
+  ```environment``` | String | Job environment, default ```devel```. By default must be one of ```prod```, ```devel```, ```test``` or ```staging<number>``` but it can be changed by the Cluster operator using the scheduler option `allowed_job_environments`.
   ```contact``` | String | Best email address to reach the owner of the job. For production jobs, this is usually a team mailing list.
   ```instances```| Integer | Number of instances (sometimes referred to as replicas or shards) of the task to create. (Default: 1)
   ```cron_schedule``` | String | Cron schedule in cron format. May only be used with non-service jobs. See [Cron Jobs](../features/cron-jobs.md) for more information. Default: None (not a cron job.)
@@ -356,6 +356,8 @@ Job Schema
   ```tier``` | String | Task tier type. The default scheduler tier configuration allows for 3 tiers: `revocable`, `preemptible`, and `preferred`. If a tier is not elected, Aurora assigns the task to a tier based on its choice of `production` (that is `preferred` for production and `preemptible` for non-production jobs). See the section on [Configuration Tiers](../features/multitenancy.md#configuration-tiers) for more information.
   ```announce``` | ```Announcer``` object | Optionally enable Zookeeper ServerSet announcements. See [Announcer Objects] for more information.
   ```enable_hooks``` | Boolean | Whether to enable [Client Hooks](client-hooks.md) for this job. (Default: False)
+  ```partition_policy``` | ```PartitionPolicy``` object | An optional partition policy that allows job owners to define how to handle partitions for running tasks (in partition-aware Aurora clusters)
+  ```metadata``` | list of ```Metadata``` objects | list of ```Metadata``` objects for user's customized metadata information.
 
 
 ### UpdateConfig Objects
@@ -403,6 +405,20 @@ Parameters for controlling a task's health checks via HTTP or a shell command.
 | -------                        | :-------: | --------
 | ```shell_command```            | String    | An alternative to HTTP health checking. Specifies a shell command that will be executed. Any non-zero exit status will be interpreted as a health check failure.
 
+### PartitionPolicy Objects
+| param                          | type      | description
+| -------                        | :-------: | --------
+| ```reschedule```               | Boolean   | Whether or not to reschedule when running tasks become partitioned (Default: True)
+| ```delay_secs```               | Integer   | How long to delay transitioning to LOST when running tasks are partitioned. (Default: 0)
+
+### Metadata Objects
+
+Describes a piece of user metadata in a key value pair
+
+  param            | type            | description
+  -----            | :----:          | -----------
+  ```key```        | String          | Indicate which metadata the user provides
+  ```value```      | String          | Provide the metadata content for corresponding key
 
 ### Announcer Objects
 
@@ -468,6 +484,15 @@ unified-container, the container can be omitted from your job config.
   param            | type                           | description
   -----            | :----:                         | -----------
   ```image```      | Choice(AppcImage, DockerImage) | An optional filesystem image to use within this container.
+  ```volumes```    | List(Volume)                   | An optional list of volume mounts for this container.
+
+### Volume Object
+
+  param                  | type     | description
+  -----                  | :----:   | -----------
+  ```container_path```   | String   | Path on the host to mount.
+  ```host_path```        | String   | Mount point in the container.
+  ```mode```             | Enum     | Mode of the mount, can be 'RW' or 'RO'.
 
 ### AppcImage
 
@@ -519,26 +544,31 @@ See [Docker Command Line Reference](https://docs.docker.com/reference/commandlin
 
 ### HttpLifecycleConfig Objects
 
-  param          | type            | description
-  -----          | :----:          | -----------
-  ```port```     | String          | The named port to send POST commands (Default: health)
-  ```graceful_shutdown_endpoint``` | String | Endpoint to hit to indicate that a task should gracefully shutdown. (Default: /quitquitquit)
-  ```shutdown_endpoint``` | String | Endpoint to hit to give a task its final warning before being killed. (Default: /abortabortabort)
+*Note: The combined `graceful_shutdown_wait_secs` and `shutdown_wait_secs` is implicitly upper bounded by the `--stop_timeout_in_secs` flag exposed by the executor (see options [here](https://github.com/apache/aurora/blob/master/src/main/python/apache/aurora/executor/bin/thermos_executor_main.py), default is 2 minutes). Therefore, if the user specifies values that add up to more than `--stop_timeout_in_secs`, the task will be killed earlier than the user anticipates (see the termination lifecycle [here](https://aurora.apache.org/documentation/latest/reference/task-lifecycle/#forceful-termination-killing-restarting)). Furthermore, `stop_timeout_in_secs` itself is implicitly upper bounded by two scheduler options: `transient_task_state_timeout` and `preemption_slot_hold_time` (see reference [here](http://aurora.apache.org/documentation/latest/reference/scheduler-configuration/). If the `stop_timeout_in_secs` exceeds either of these scheduler options, tasks could be designated as LOST or tasks utilizing preemption could lose their desired slot respectively. Cluster operators should be aware of these timings should they change the defaults.*
+
+  param                             | type    | description
+  -----                             | :----:  | -----------
+  ```port```                        | String  | The named port to send POST commands. (Default: health)
+  ```graceful_shutdown_endpoint```  | String  | Endpoint to hit to indicate that a task should gracefully shutdown. (Default: /quitquitquit)
+  ```shutdown_endpoint```           | String  | Endpoint to hit to give a task its final warning before being killed. (Default: /abortabortabort)
+  ```graceful_shutdown_wait_secs``` | Integer | The amount of time (in seconds) to wait after hitting the ```graceful_shutdown_endpoint``` before proceeding with the [task termination lifecycle](https://aurora.apache.org/documentation/latest/reference/task-lifecycle/#forceful-termination-killing-restarting). (Default: 5)
+  ```shutdown_wait_secs```          | Integer | The amount of time (in seconds) to wait after hitting the ```shutdown_endpoint``` before proceeding with the [task termination lifecycle](https://aurora.apache.org/documentation/latest/reference/task-lifecycle/#forceful-termination-killing-restarting). (Default: 5)
 
 #### graceful_shutdown_endpoint
 
 If the Job is listening on the port as specified by the HttpLifecycleConfig
 (default: `health`), a HTTP POST request will be sent over localhost to this
 endpoint to request that the task gracefully shut itself down.  This is a
-courtesy call before the `shutdown_endpoint` is invoked a fixed amount of
-time later.
+courtesy call before the `shutdown_endpoint` is invoked
+`graceful_shutdown_wait_secs` seconds later.
 
 #### shutdown_endpoint
 
 If the Job is listening on the port as specified by the HttpLifecycleConfig
 (default: `health`), a HTTP POST request will be sent over localhost to this
 endpoint to request as a final warning before being shut down.  If the task
-does not shut down on its own after this, it will be forcefully killed
+does not shut down on its own after `shutdown_wait_secs` seconds, it will be
+forcefully killed.
 
 
 Specifying Scheduling Constraints

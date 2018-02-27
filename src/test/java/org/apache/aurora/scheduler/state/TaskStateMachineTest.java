@@ -14,11 +14,13 @@
 package org.apache.aurora.scheduler.state;
 
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
+import com.google.common.base.MoreObjects;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -27,6 +29,7 @@ import com.google.common.collect.Sets;
 
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.ScheduledTask;
+import org.apache.aurora.gen.TaskEvent;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
 import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.state.SideEffect.Action;
@@ -48,6 +51,7 @@ import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.INIT;
 import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.KILLED;
 import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.KILLING;
 import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.LOST;
+import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.PARTITIONED;
 import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.PENDING;
 import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.PREEMPTING;
 import static org.apache.aurora.scheduler.state.TaskStateMachine.TaskState.RESTARTING;
@@ -84,6 +88,17 @@ public class TaskStateMachineTest {
     stateMachine = makeStateMachine(makeTask(true));
     expectUpdateStateOnTransitionTo(PENDING, ASSIGNED, STARTING, RUNNING);
     legalTransition(FINISHED, Action.SAVE_STATE, Action.RESCHEDULE);
+  }
+
+  @Test
+  public void testPartitionedAndLostOnlyReschedulesWhenNotKilling() {
+    ScheduledTask task = makeTask(true);
+    task.addToTaskEvents(new TaskEvent().setStatus(ScheduleStatus.KILLING));
+    stateMachine = makeStateMachine(task);
+    expectUpdateStateOnTransitionTo(PENDING, ASSIGNED, STARTING, RUNNING);
+    legalTransition(KILLING, Action.SAVE_STATE, Action.KILL);
+    legalTransition(PARTITIONED, Action.SAVE_STATE, Action.TRANSITION_TO_LOST);
+    legalTransition(LOST, Action.SAVE_STATE, Action.KILL);
   }
 
   @Test
@@ -276,7 +291,7 @@ public class TaskStateMachineTest {
   }
 
   private static final Function<Action, SideEffect> TO_SIDE_EFFECT =
-      action -> new SideEffect(action, Optional.absent());
+      action -> new SideEffect(action, Optional.empty());
 
   private void legalTransition(TaskState state, SideEffect.Action... expectedActions) {
     legalTransition(state, ImmutableSet.copyOf(expectedActions));
@@ -323,34 +338,38 @@ public class TaskStateMachineTest {
 
   private static final TransitionResult SAVE = new TransitionResult(
       SUCCESS,
-      ImmutableSet.of(new SideEffect(Action.SAVE_STATE, Optional.absent())));
+      ImmutableSet.of(new SideEffect(Action.SAVE_STATE, Optional.empty())));
   private static final TransitionResult SAVE_AND_KILL = new TransitionResult(
       SUCCESS,
       ImmutableSet.of(
-          new SideEffect(Action.SAVE_STATE, Optional.absent()),
-          new SideEffect(Action.KILL, Optional.absent())));
+          new SideEffect(Action.SAVE_STATE, Optional.empty()),
+          new SideEffect(Action.KILL, Optional.empty())));
   private static final TransitionResult SAVE_AND_RESCHEDULE = new TransitionResult(
       SUCCESS,
       ImmutableSet.of(
-          new SideEffect(Action.SAVE_STATE, Optional.absent()),
-          new SideEffect(Action.RESCHEDULE, Optional.absent())));
+          new SideEffect(Action.SAVE_STATE, Optional.empty()),
+          new SideEffect(Action.RESCHEDULE, Optional.empty())));
   private static final TransitionResult SAVE_KILL_AND_RESCHEDULE = new TransitionResult(
       SUCCESS,
       ImmutableSet.of(
-          new SideEffect(Action.SAVE_STATE, Optional.absent()),
-          new SideEffect(Action.KILL, Optional.absent()),
-          new SideEffect(Action.RESCHEDULE, Optional.absent())));
+          new SideEffect(Action.SAVE_STATE, Optional.empty()),
+          new SideEffect(Action.KILL, Optional.empty()),
+          new SideEffect(Action.RESCHEDULE, Optional.empty())));
   private static final TransitionResult ILLEGAL_KILL = new TransitionResult(
       ILLEGAL_WITH_SIDE_EFFECTS,
-      ImmutableSet.of(new SideEffect(Action.KILL, Optional.absent())));
+      ImmutableSet.of(new SideEffect(Action.KILL, Optional.empty())));
+  private static final TransitionResult TRANSITION_TO_LOST = new TransitionResult(
+      SUCCESS,
+      ImmutableSet.of(new SideEffect(Action.TRANSITION_TO_LOST, Optional.empty()),
+          new SideEffect(Action.SAVE_STATE, Optional.empty())));
   private static final TransitionResult RECORD_FAILURE = new TransitionResult(
       SUCCESS,
       ImmutableSet.of(
-          new SideEffect(Action.SAVE_STATE, Optional.absent()),
-          new SideEffect(Action.INCREMENT_FAILURES, Optional.absent())));
+          new SideEffect(Action.SAVE_STATE, Optional.empty()),
+          new SideEffect(Action.INCREMENT_FAILURES, Optional.empty())));
   private static final TransitionResult DELETE_TASK = new TransitionResult(
       SUCCESS,
-      ImmutableSet.of(new SideEffect(Action.DELETE, Optional.absent())));
+      ImmutableSet.of(new SideEffect(Action.DELETE, Optional.empty())));
 
   private static final class TestCase {
     private final boolean taskPresent;
@@ -382,7 +401,7 @@ public class TaskStateMachineTest {
 
     @Override
     public String toString() {
-      return com.google.common.base.Objects.toStringHelper(this)
+      return MoreObjects.toStringHelper(this)
           .add("taskPresent", taskPresent)
           .add("from", from)
           .add("to", to)
@@ -432,6 +451,7 @@ public class TaskStateMachineTest {
           .put(new TestCase(true, STARTING, KILLED), SAVE_AND_RESCHEDULE)
           .put(new TestCase(true, STARTING, KILLING), SAVE_AND_KILL)
           .put(new TestCase(true, STARTING, LOST), SAVE_AND_RESCHEDULE)
+          .put(new TestCase(true, STARTING, PARTITIONED), SAVE)
           .put(new TestCase(false, RUNNING, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(false, RUNNING, STARTING), ILLEGAL_KILL)
           .put(new TestCase(false, RUNNING, RUNNING), ILLEGAL_KILL)
@@ -443,6 +463,7 @@ public class TaskStateMachineTest {
           .put(new TestCase(true, RUNNING, KILLED), SAVE_AND_RESCHEDULE)
           .put(new TestCase(true, RUNNING, KILLING), SAVE_AND_KILL)
           .put(new TestCase(true, RUNNING, LOST), SAVE_AND_RESCHEDULE)
+          .put(new TestCase(true, RUNNING, PARTITIONED), SAVE)
           .put(new TestCase(true, FINISHED, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(false, FINISHED, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(true, FINISHED, STARTING), ILLEGAL_KILL)
@@ -461,6 +482,7 @@ public class TaskStateMachineTest {
           .put(new TestCase(true, PREEMPTING, KILLED), SAVE_AND_RESCHEDULE)
           .put(new TestCase(true, PREEMPTING, KILLING), SAVE)
           .put(new TestCase(true, PREEMPTING, LOST), SAVE_KILL_AND_RESCHEDULE)
+          .put(new TestCase(true, PREEMPTING, PARTITIONED), TRANSITION_TO_LOST)
           .put(new TestCase(true, RESTARTING, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(false, RESTARTING, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(true, RESTARTING, STARTING), ILLEGAL_KILL)
@@ -472,6 +494,7 @@ public class TaskStateMachineTest {
           .put(new TestCase(true, RESTARTING, KILLED), SAVE_AND_RESCHEDULE)
           .put(new TestCase(true, RESTARTING, KILLING), SAVE)
           .put(new TestCase(true, RESTARTING, LOST), SAVE_KILL_AND_RESCHEDULE)
+          .put(new TestCase(true, RESTARTING, PARTITIONED), TRANSITION_TO_LOST)
           .put(new TestCase(true, DRAINING, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(false, DRAINING, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(true, DRAINING, STARTING), ILLEGAL_KILL)
@@ -483,6 +506,7 @@ public class TaskStateMachineTest {
           .put(new TestCase(true, DRAINING, KILLED), SAVE_AND_RESCHEDULE)
           .put(new TestCase(true, DRAINING, KILLING), SAVE)
           .put(new TestCase(true, DRAINING, LOST), SAVE_KILL_AND_RESCHEDULE)
+          .put(new TestCase(true, DRAINING, PARTITIONED), TRANSITION_TO_LOST)
           .put(new TestCase(true, FAILED, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(false, FAILED, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(true, FAILED, STARTING), ILLEGAL_KILL)
@@ -508,6 +532,20 @@ public class TaskStateMachineTest {
           .put(new TestCase(true, KILLING, KILLED), SAVE)
           .put(new TestCase(true, KILLING, LOST), SAVE)
           .put(new TestCase(true, KILLING, DELETED), DELETE_TASK)
+          .put(new TestCase(true, KILLING, PARTITIONED), TRANSITION_TO_LOST)
+          .put(new TestCase(false, PARTITIONED, ASSIGNED), ILLEGAL_KILL)
+          .put(new TestCase(true, PARTITIONED, ASSIGNED), SAVE)
+          .put(new TestCase(false, PARTITIONED, STARTING), ILLEGAL_KILL)
+          .put(new TestCase(true, PARTITIONED, STARTING), SAVE)
+          .put(new TestCase(false, PARTITIONED, RUNNING), ILLEGAL_KILL)
+          .put(new TestCase(true, PARTITIONED, RUNNING), SAVE)
+          .put(new TestCase(true, PARTITIONED, PREEMPTING), TRANSITION_TO_LOST)
+          .put(new TestCase(true, PARTITIONED, RESTARTING), TRANSITION_TO_LOST)
+          .put(new TestCase(true, PARTITIONED, DRAINING), TRANSITION_TO_LOST)
+          .put(new TestCase(true, PARTITIONED, KILLING), TRANSITION_TO_LOST)
+          .put(new TestCase(true, PARTITIONED, FAILED), RECORD_FAILURE)
+          .put(new TestCase(true, PARTITIONED, FINISHED), SAVE)
+          .put(new TestCase(true, PARTITIONED, LOST), SAVE_KILL_AND_RESCHEDULE)
           .put(new TestCase(true, LOST, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(false, LOST, ASSIGNED), ILLEGAL_KILL)
           .put(new TestCase(true, LOST, STARTING), ILLEGAL_KILL)
@@ -546,7 +584,7 @@ public class TaskStateMachineTest {
               if (expectException) {
                 fail();
               }
-            } catch (IllegalStateException e) {
+            } catch (NoSuchElementException e) {
               if (expectException) {
                 continue;
               } else {

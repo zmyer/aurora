@@ -13,9 +13,9 @@
  */
 package org.apache.aurora.scheduler.mesos;
 
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.base.Optional;
 import com.google.common.eventbus.EventBus;
 
 import org.apache.aurora.common.quantity.Amount;
@@ -25,9 +25,9 @@ import org.apache.aurora.common.stats.StatsProvider.RequestTimer;
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.common.util.testing.FakeClock;
 import org.apache.aurora.scheduler.events.PubsubEvent.TaskStatusReceived;
-import org.apache.mesos.Protos.TaskState;
-import org.apache.mesos.Protos.TaskStatus.Reason;
-import org.apache.mesos.Protos.TaskStatus.Source;
+import org.apache.mesos.v1.Protos.TaskState;
+import org.apache.mesos.v1.Protos.TaskStatus.Reason;
+import org.apache.mesos.v1.Protos.TaskStatus.Source;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -71,7 +71,7 @@ public class TaskStatusStatsTest extends EasyMockTest {
         .andReturn(masterLostCounter);
 
     AtomicLong slaveDisconnectedCounter = new AtomicLong();
-    expect(statsProvider.makeCounter(reasonCounterName(Reason.REASON_SLAVE_DISCONNECTED)))
+    expect(statsProvider.makeCounter(reasonCounterName(Reason.REASON_AGENT_DISCONNECTED)))
         .andReturn(slaveDisconnectedCounter);
 
     AtomicLong memoryLimitCounter = new AtomicLong();
@@ -88,14 +88,14 @@ public class TaskStatusStatsTest extends EasyMockTest {
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_RUNNING,
         Optional.of(Source.SOURCE_MASTER),
-        Optional.absent(),
+        Optional.empty(),
         Optional.of(agoMicros(ONE_SECOND))));
 
     clock.advance(ONE_SECOND);
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_LOST,
         Optional.of(Source.SOURCE_MASTER),
-        Optional.of(Reason.REASON_SLAVE_DISCONNECTED),
+        Optional.of(Reason.REASON_AGENT_DISCONNECTED),
         Optional.of(agoMicros(ONE_SECOND))));
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_FAILED,
@@ -111,25 +111,25 @@ public class TaskStatusStatsTest extends EasyMockTest {
     // No counting for these since they do not have both a source and timestamp.
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_LOST,
-        Optional.absent(),
-        Optional.absent(),
-        Optional.absent()));
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty()));
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_LOST,
-        Optional.absent(),
-        Optional.absent(),
+        Optional.empty(),
+        Optional.empty(),
         Optional.of(agoMicros(ONE_SECOND))));
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_LOST,
         Optional.of(Source.SOURCE_MASTER),
-        Optional.of(Reason.REASON_SLAVE_DISCONNECTED),
-        Optional.absent()));
+        Optional.of(Reason.REASON_AGENT_DISCONNECTED),
+        Optional.empty()));
 
     // No time tracking for this since the timestamp is the current time.
     eventBus.post(new TaskStatusReceived(
         TaskState.TASK_LOST,
         Optional.of(Source.SOURCE_MASTER),
-        Optional.of(Reason.REASON_SLAVE_DISCONNECTED),
+        Optional.of(Reason.REASON_AGENT_DISCONNECTED),
         Optional.of(clock.nowMillis() * 1000)
     ));
 

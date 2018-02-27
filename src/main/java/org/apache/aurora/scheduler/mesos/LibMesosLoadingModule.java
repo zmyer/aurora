@@ -15,12 +15,39 @@ package org.apache.aurora.scheduler.mesos;
 
 import com.google.inject.AbstractModule;
 
+import org.apache.aurora.scheduler.app.SchedulerMain.Options.DriverKind;
+import org.apache.mesos.v1.scheduler.V0Mesos;
+import org.apache.mesos.v1.scheduler.V1Mesos;
+
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * A module that binds a driver factory which requires the libmesos native libary.
  */
 public class LibMesosLoadingModule extends AbstractModule {
+  private final DriverKind kind;
+
+  public LibMesosLoadingModule(DriverKind kind)  {
+    this.kind = kind;
+  }
+
   @Override
   protected void configure() {
-    bind(DriverFactory.class).to(DriverFactoryImpl.class);
+    switch(kind) {
+      case SCHEDULER_DRIVER:
+        bind(DriverFactory.class).to(DriverFactoryImpl.class);
+        break;
+      case V0_DRIVER:
+        bind(VersionedDriverFactory.class).toInstance((scheduler, frameworkInfo, master, creds)
+            -> new V0Mesos(scheduler, frameworkInfo, master, creds.orElse(null)));
+        break;
+      case V1_DRIVER:
+        bind(VersionedDriverFactory.class).toInstance((scheduler, frameworkInfo, master, creds)
+            -> new V1Mesos(scheduler, master, creds.orElse(null)));
+        break;
+      default:
+        checkState(false, "Unknown driver kind");
+        break;
+    }
   }
 }

@@ -15,18 +15,18 @@ package org.apache.aurora.scheduler.quota;
 
 import java.util.EnumSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.RangeSet;
 
@@ -38,7 +38,6 @@ import org.apache.aurora.scheduler.configuration.ConfigurationManager;
 import org.apache.aurora.scheduler.resources.ResourceBag;
 import org.apache.aurora.scheduler.resources.ResourceManager;
 import org.apache.aurora.scheduler.resources.ResourceType;
-import org.apache.aurora.scheduler.storage.JobUpdateStore;
 import org.apache.aurora.scheduler.storage.Storage.MutableStoreProvider;
 import org.apache.aurora.scheduler.storage.Storage.StoreProvider;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
@@ -48,7 +47,6 @@ import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdate;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateInstructions;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateQuery;
-import org.apache.aurora.scheduler.storage.entities.IJobUpdateSummary;
 import org.apache.aurora.scheduler.storage.entities.IRange;
 import org.apache.aurora.scheduler.storage.entities.IResourceAggregate;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
@@ -174,7 +172,7 @@ public interface QuotaManager {
         throw new QuotaException("Negative values in: " + quota.toString());
       }
 
-      QuotaInfo info = getQuotaInfo(ownerRole, Optional.absent(), storeProvider);
+      QuotaInfo info = getQuotaInfo(ownerRole, Optional.empty(), storeProvider);
       ResourceBag prodConsumption = info.getProdSharedConsumption();
       ResourceBag overage = bagFromAggregate(quota).subtract(prodConsumption);
       if (!overage.filter(IS_NEGATIVE).getResourceVectors().isEmpty()) {
@@ -189,7 +187,7 @@ public interface QuotaManager {
 
     @Override
     public QuotaInfo getQuotaInfo(String role, StoreProvider storeProvider) {
-      return getQuotaInfo(role, Optional.absent(), storeProvider);
+      return getQuotaInfo(role, Optional.empty(), storeProvider);
     }
 
     @Override
@@ -239,7 +237,7 @@ public interface QuotaManager {
       }
 
       QuotaInfo quotaInfo =
-          getQuotaInfo(cronConfig.getKey().getRole(), Optional.absent(), storeProvider);
+          getQuotaInfo(cronConfig.getKey().getRole(), Optional.empty(), storeProvider);
 
       Optional<IJobConfiguration> oldCron =
           storeProvider.getCronJobStore().fetchJob(cronConfig.getKey());
@@ -274,8 +272,13 @@ public interface QuotaManager {
           .from(storeProvider.getTaskStore().fetchTasks(Query.roleScoped(role).active()))
           .transform(IScheduledTask::getAssignedTask);
 
-      Map<IJobKey, IJobUpdateInstructions> updates = Maps.newHashMap(
-          fetchActiveJobUpdates(storeProvider.getJobUpdateStore(), role));
+      // Relies on the invariant of at-most-one active update per job.
+      Map<IJobKey, IJobUpdateInstructions> updates = storeProvider.getJobUpdateStore()
+          .fetchJobUpdates(updateQuery(role))
+          .stream()
+          .collect(Collectors.toMap(
+              u -> u.getUpdate().getSummary().getKey().getJob(),
+              u -> u.getUpdate().getInstructions()));
 
       // Mix in a requested job update (if present) to correctly calculate consumption.
       // This would be an update that is not saved in the store yet (i.e. the one quota is
@@ -293,8 +296,8 @@ public interface QuotaManager {
 
       return new QuotaInfo(
           storeProvider.getQuotaStore().fetchQuota(role)
-              .transform(ResourceManager::bagFromAggregate)
-              .or(EMPTY),
+              .map(ResourceManager::bagFromAggregate)
+              .orElse(EMPTY),
           getConsumption(tasks, updates, cronTemplates, PROD_SHARED),
           getConsumption(tasks, updates, cronTemplates, PROD_DEDICATED),
           getConsumption(tasks, updates, cronTemplates, NON_PROD_SHARED),
@@ -381,7 +384,7 @@ public interface QuotaManager {
         final Map<IJobKey, IJobUpdateInstructions> roleJobUpdates) {
 
       return task -> {
-        Optional<IJobUpdateInstructions> update = Optional.fromNullable(
+        Optional<IJobUpdateInstructions> update = Optional.ofNullable(
             roleJobUpdates.get(task.getTask().getJob()));
 
         if (update.isPresent()) {
@@ -396,20 +399,6 @@ public interface QuotaManager {
         }
         return true;
       };
-    }
-
-    private static Map<IJobKey, IJobUpdateInstructions> fetchActiveJobUpdates(
-        final JobUpdateStore jobUpdateStore,
-        String role) {
-
-      Function<IJobUpdateSummary, IJobUpdate> fetchUpdate =
-          summary -> jobUpdateStore.fetchJobUpdate(summary.getKey()).get();
-
-      return Maps.transformValues(
-          FluentIterable.from(jobUpdateStore.fetchJobUpdateSummaries(updateQuery(role)))
-              .transform(fetchUpdate)
-              .uniqueIndex(UPDATE_TO_JOB_KEY),
-          IJobUpdate::getInstructions);
     }
 
     @VisibleForTesting
@@ -448,7 +437,9 @@ public interface QuotaManager {
         Iterable<IInstanceTaskConfig> initialState =
             Iterables.filter(instructions.getInitialState(), instanceFilter);
         Iterable<IInstanceTaskConfig> desiredState = Iterables.filter(
-            Optional.fromNullable(instructions.getDesiredState()).asSet(),
+            Optional.ofNullable(instructions.getDesiredState())
+                .map(ImmutableSet::of)
+                .orElse(ImmutableSet.of()),
             instanceFilter);
 
         // Calculate result as max(existing, desired) per resource type.
@@ -473,9 +464,6 @@ public interface QuotaManager {
     private static ResourceBag fromTasks(Iterable<ITaskConfig> tasks) {
       return addAll(Iterables.transform(tasks, QUOTA_RESOURCES));
     }
-
-    private static final Function<IJobUpdate, IJobKey> UPDATE_TO_JOB_KEY =
-        input -> input.getSummary().getKey().getJob();
 
     private static int getUpdateInstanceCount(Set<IRange> ranges) {
       int instanceCount = 0;

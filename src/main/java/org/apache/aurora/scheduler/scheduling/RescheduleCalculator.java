@@ -15,24 +15,24 @@ package org.apache.aurora.scheduler.scheduling;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
-import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
 import org.apache.aurora.common.util.BackoffStrategy;
 import org.apache.aurora.common.util.Random;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.scheduler.base.Tasks;
+import org.apache.aurora.scheduler.config.types.TimeAmount;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskEvent;
@@ -115,13 +115,13 @@ public interface RescheduleCalculator {
     @VisibleForTesting
     public static class RescheduleCalculatorSettings {
       private final BackoffStrategy flappingTaskBackoff;
-      private final Amount<Long, Time> flappingTaskThreashold;
-      private final Amount<Integer, Time>  maxStartupRescheduleDelay;
+      private final TimeAmount flappingTaskThreashold;
+      private final TimeAmount  maxStartupRescheduleDelay;
 
       public RescheduleCalculatorSettings(
           BackoffStrategy flappingTaskBackoff,
-          Amount<Long, Time> flappingTaskThreashold,
-          Amount<Integer, Time> maxStartupRescheduleDelay) {
+          TimeAmount flappingTaskThreashold,
+          TimeAmount maxStartupRescheduleDelay) {
 
         this.flappingTaskBackoff = requireNonNull(flappingTaskBackoff);
         this.flappingTaskThreashold = requireNonNull(flappingTaskThreashold);
@@ -143,7 +143,7 @@ public interface RescheduleCalculator {
 
     private Optional<IScheduledTask> getTaskAncestor(IScheduledTask task) {
       if (!task.isSetAncestorId()) {
-        return Optional.absent();
+        return Optional.empty();
       }
 
       return Storage.Util.fetchTask(storage, task.getAncestorId());

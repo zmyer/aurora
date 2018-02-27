@@ -24,7 +24,6 @@ import com.google.inject.Guice;
 import com.google.inject.Injector;
 
 import org.apache.aurora.benchmark.fakes.FakeStatsProvider;
-import org.apache.aurora.common.inject.Bindings;
 import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.common.util.Clock;
 import org.apache.aurora.gen.ReadOnlyScheduler;
@@ -36,10 +35,9 @@ import org.apache.aurora.scheduler.base.TaskTestUtil;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager;
 import org.apache.aurora.scheduler.cron.CronPredictor;
 import org.apache.aurora.scheduler.quota.QuotaManager;
-import org.apache.aurora.scheduler.state.LockManager;
 import org.apache.aurora.scheduler.storage.Storage;
-import org.apache.aurora.scheduler.storage.db.DbModule;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.apache.aurora.scheduler.thrift.ThriftModule;
 import org.apache.thrift.TException;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -149,13 +147,12 @@ public class ThriftApiBenchmarks {
             bind(Clock.class).toInstance(Clock.SYSTEM_CLOCK);
             bind(CronPredictor.class).toInstance(createThrowingFake(CronPredictor.class));
             bind(QuotaManager.class).toInstance(createThrowingFake(QuotaManager.class));
-            bind(LockManager.class).toInstance(createThrowingFake(LockManager.class));
             bind(StatsProvider.class).toInstance(new FakeStatsProvider());
             bind(ConfigurationManager.class).toInstance(TaskTestUtil.CONFIGURATION_MANAGER);
           }
         },
-        new AsyncModule(),
-        DbModule.productionModule(Bindings.KeyFactory.PLAIN),
+        new AsyncModule(new AsyncModule.Options()),
+        new MemStorageModule(),
         new ThriftModule.ReadOnly());
   }
 

@@ -17,10 +17,10 @@ import java.util.Collection;
 
 import com.google.common.util.concurrent.Service;
 
-import org.apache.mesos.Protos.Filters;
-import org.apache.mesos.Protos.Offer.Operation;
-import org.apache.mesos.Protos.OfferID;
-import org.apache.mesos.Protos.TaskStatus;
+import org.apache.mesos.v1.Protos.Filters;
+import org.apache.mesos.v1.Protos.Offer.Operation;
+import org.apache.mesos.v1.Protos.OfferID;
+import org.apache.mesos.v1.Protos.TaskStatus;
 
 /**
  * Wraps the mesos Scheduler driver to ensure its used in a valid lifecycle; namely:
@@ -40,6 +40,14 @@ public interface Driver extends Service {
    * @param filter offer filter applied to unused resources in this offer.
    */
   void acceptOffers(OfferID offerId, Collection<Operation> operations, Filters filter);
+
+  /**
+   * Accepts an inverse offer.
+   *
+   * @param offerID ID of the inverse offer.
+   * @param filter offer filter to apply.
+   */
+  void acceptInverseOffer(OfferID offerID, Filters filter);
 
   /**
    * Declines a resource offer.

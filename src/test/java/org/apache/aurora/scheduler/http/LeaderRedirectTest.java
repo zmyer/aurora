@@ -14,21 +14,22 @@
 package org.apache.aurora.scheduler.http;
 
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.net.HostAndPort;
 
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
-import org.apache.aurora.common.thrift.Endpoint;
-import org.apache.aurora.common.thrift.ServiceInstance;
 import org.apache.aurora.scheduler.app.ServiceGroupMonitor;
 import org.apache.aurora.scheduler.app.ServiceGroupMonitor.MonitorException;
+import org.apache.aurora.scheduler.discovery.ServiceInstance;
+import org.apache.aurora.scheduler.discovery.ServiceInstance.Endpoint;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -42,8 +43,9 @@ public class LeaderRedirectTest extends EasyMockTest {
   private static final int HTTP_PORT = 500;
 
   private static final Function<HostAndPort, ServiceInstance> CREATE_INSTANCE =
-      endpoint -> new ServiceInstance()
-          .setServiceEndpoint(new Endpoint(endpoint.getHostText(), endpoint.getPort()));
+      endpoint -> new ServiceInstance(
+          new Endpoint(endpoint.getHost(), endpoint.getPort()),
+          ImmutableMap.of());
 
   private AtomicReference<ImmutableSet<ServiceInstance>> schedulers;
   private ServiceGroupMonitor serviceGroupMonitor;
@@ -75,7 +77,7 @@ public class LeaderRedirectTest extends EasyMockTest {
     replayAndMonitor(3);
     publishSchedulers(localPort(HTTP_PORT));
 
-    assertEquals(Optional.absent(), leaderRedirector.getRedirect());
+    assertEquals(Optional.empty(), leaderRedirector.getRedirect());
 
     // NB: LEADING takes 2 tests of the server group membership to calculate; thus we expect 3
     // server group get calls, 1 for the getRedirect() above and 2 here.
@@ -114,7 +116,7 @@ public class LeaderRedirectTest extends EasyMockTest {
   public void testNoLeaders() throws Exception {
     replayAndMonitor(2);
 
-    assertEquals(Optional.absent(), leaderRedirector.getRedirect());
+    assertEquals(Optional.empty(), leaderRedirector.getRedirect());
     assertEquals(LeaderStatus.NO_LEADER, leaderRedirector.getLeaderStatus());
   }
 
@@ -124,17 +126,7 @@ public class LeaderRedirectTest extends EasyMockTest {
 
     publishSchedulers(HostAndPort.fromParts("foobar", 500), HostAndPort.fromParts("baz", 800));
 
-    assertEquals(Optional.absent(), leaderRedirector.getRedirect());
-    assertEquals(LeaderStatus.NO_LEADER, leaderRedirector.getLeaderStatus());
-  }
-
-  @Test
-  public void testBadServiceInstance() throws Exception {
-    replayAndMonitor(2);
-
-    publishSchedulers(ImmutableSet.of(new ServiceInstance()));
-
-    assertEquals(Optional.absent(), leaderRedirector.getRedirect());
+    assertEquals(Optional.empty(), leaderRedirector.getRedirect());
     assertEquals(LeaderStatus.NO_LEADER, leaderRedirector.getLeaderStatus());
   }
 

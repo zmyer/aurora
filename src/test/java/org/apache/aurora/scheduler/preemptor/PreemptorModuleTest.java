@@ -13,20 +13,21 @@
  */
 package org.apache.aurora.scheduler.preemptor;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
+
+import com.google.common.collect.ImmutableList;
 import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 
-import org.apache.aurora.common.quantity.Amount;
-import org.apache.aurora.common.quantity.Time;
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.gen.AssignedTask;
+import org.apache.aurora.scheduler.config.CliOptions;
 import org.apache.aurora.scheduler.filter.AttributeAggregate;
 import org.apache.aurora.scheduler.filter.SchedulingFilter;
+import org.apache.aurora.scheduler.scheduling.TaskAssigner;
 import org.apache.aurora.scheduler.state.StateManager;
-import org.apache.aurora.scheduler.state.TaskAssigner;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
@@ -64,19 +65,30 @@ public class PreemptorModuleTest extends EasyMockTest {
         });
   }
 
+  public static class FakeSlotFinder extends AbstractModule {
+    @Override
+    protected void configure() {
+      Runnable alwaysThrow = () -> {
+        throw new RuntimeException("I should not run");
+      };
+      bind(Runnable.class).annotatedWith(PreemptorModule.PreemptionSlotFinder.class)
+          .toInstance(alwaysThrow);
+    }
+  }
+
   @Test
   public void testPreemptorDisabled() throws Exception {
-    Injector injector = createInjector(new PreemptorModule(
-        false,
-        Amount.of(0L, Time.SECONDS),
-        Amount.of(0L, Time.SECONDS),
-        5));
+    CliOptions options = new CliOptions();
+    options.preemptor.enablePreemptor = false;
+    options.preemptor.slotFinderModules = ImmutableList.of(FakeSlotFinder.class);
+
+    Injector injector = createInjector(new PreemptorModule(options));
 
     control.replay();
 
     injector.getBindings();
     assertEquals(
-        Optional.absent(),
+        Optional.empty(),
         injector.getInstance(Preemptor.class).attemptPreemptionFor(
             IAssignedTask.build(new AssignedTask()),
             AttributeAggregate.empty(),

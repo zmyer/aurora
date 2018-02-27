@@ -15,6 +15,7 @@ package org.apache.aurora.scheduler.storage;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -22,7 +23,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -44,7 +44,6 @@ import org.apache.aurora.gen.AppcImage;
 import org.apache.aurora.gen.Attribute;
 import org.apache.aurora.gen.Container;
 import org.apache.aurora.gen.DockerImage;
-import org.apache.aurora.gen.ExecutorConfig;
 import org.apache.aurora.gen.HostAttributes;
 import org.apache.aurora.gen.Image;
 import org.apache.aurora.gen.MaintenanceMode;
@@ -74,9 +73,7 @@ import static org.apache.aurora.gen.ScheduleStatus.ASSIGNED;
 import static org.apache.aurora.gen.ScheduleStatus.RUNNING;
 import static org.apache.aurora.scheduler.base.TaskTestUtil.makeTask;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
 
 public abstract class AbstractTaskStoreTest extends TearDownTestCase {
   protected static final IHostAttributes HOST_A = IHostAttributes.build(
@@ -137,11 +134,6 @@ public abstract class AbstractTaskStoreTest extends TearDownTestCase {
         storeProvider -> storeProvider.getUnsafeTaskStore().mutateTask(taskId, mutation));
   }
 
-  private boolean unsafeModifyInPlace(String taskId, ITaskConfig taskConfiguration) {
-    return storage.write(storeProvider ->
-        storeProvider.getUnsafeTaskStore().unsafeModifyInPlace(taskId, taskConfiguration));
-  }
-
   protected void deleteTasks(String... taskIds) {
     storage.write((NoResult.Quiet) storeProvider ->
         storeProvider.getUnsafeTaskStore().deleteTasks(ImmutableSet.copyOf(taskIds)));
@@ -197,7 +189,9 @@ public abstract class AbstractTaskStoreTest extends TearDownTestCase {
   public void testSaveWithContainerVolumes() {
     ScheduledTask builder = TASK_B.newBuilder();
     Image image = Image.docker(new DockerImage().setName("some-name").setTag("some-tag"));
-    List<Volume> volumes = ImmutableList.of(new Volume("container", "host", Mode.RO));
+    List<Volume> volumes = ImmutableList.of(
+        new Volume("container2", "host2", Mode.RW),
+        new Volume("container", "host", Mode.RO));
     builder.getAssignedTask().getTask().getContainer().getMesos().setImage(image)
         .setVolumes(volumes);
 
@@ -364,7 +358,7 @@ public abstract class AbstractTaskStoreTest extends TearDownTestCase {
         IScheduledTask.build(TASK_A.newBuilder().setStatus(RUNNING)));
 
     assertEquals(
-        Optional.absent(),
+        Optional.empty(),
         mutateTask(
             "nonexistent",
             task -> IScheduledTask.build(task.newBuilder().setStatus(RUNNING))));
@@ -374,25 +368,6 @@ public abstract class AbstractTaskStoreTest extends TearDownTestCase {
         IScheduledTask.build(TASK_B.newBuilder().setStatus(ASSIGNED)),
         IScheduledTask.build(TASK_C.newBuilder().setStatus(ASSIGNED)),
         IScheduledTask.build(TASK_D.newBuilder().setStatus(ASSIGNED)));
-  }
-
-  @Test
-  public void testUnsafeModifyInPlace() {
-    ITaskConfig updated = ITaskConfig.build(
-        TASK_A.getAssignedTask()
-            .getTask()
-            .newBuilder()
-            .setExecutorConfig(new ExecutorConfig("aurora", "new_config")));
-
-    String taskId = Tasks.id(TASK_A);
-    assertFalse(unsafeModifyInPlace(taskId, updated));
-
-    saveTasks(TASK_A);
-    assertTrue(unsafeModifyInPlace(taskId, updated));
-    assertEquals(updated, fetchTask(taskId).get().getAssignedTask().getTask());
-
-    deleteTasks(taskId);
-    assertFalse(unsafeModifyInPlace(taskId, updated));
   }
 
   @Test
@@ -683,7 +658,8 @@ public abstract class AbstractTaskStoreTest extends TearDownTestCase {
   private void assertQueryResults(Query.Builder query, Set<IScheduledTask> tasks) {
     Iterable<IScheduledTask> result = fetchTasks(query);
     assertQueryHasNoDupes(result);
-    assertEquals(tasks, ImmutableSet.copyOf(fetchTasks(query)));
+    Set<IScheduledTask> set = ImmutableSet.copyOf(result);
+    assertEquals(tasks, set);
   }
 
   private void assertQueryHasNoDupes(Iterable<IScheduledTask> result) {

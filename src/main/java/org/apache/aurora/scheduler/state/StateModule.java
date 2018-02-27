@@ -13,17 +13,25 @@
  */
 package org.apache.aurora.scheduler.state;
 
+import java.util.List;
 import javax.inject.Singleton;
 
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.inject.AbstractModule;
 import com.google.inject.Binder;
+import com.google.inject.Module;
 
+import org.apache.aurora.scheduler.app.MoreModules;
+import org.apache.aurora.scheduler.config.CliOptions;
+import org.apache.aurora.scheduler.config.splitters.CommaSplitter;
 import org.apache.aurora.scheduler.events.PubsubEventModule;
 import org.apache.aurora.scheduler.mesos.MesosTaskFactory;
 import org.apache.aurora.scheduler.mesos.MesosTaskFactory.MesosTaskFactoryImpl;
+import org.apache.aurora.scheduler.scheduling.TaskAssignerImplModule;
 import org.apache.aurora.scheduler.state.MaintenanceController.MaintenanceControllerImpl;
-import org.apache.aurora.scheduler.state.TaskAssigner.TaskAssignerImpl;
 import org.apache.aurora.scheduler.state.UUIDGenerator.UUIDGeneratorImpl;
 
 /**
@@ -31,10 +39,26 @@ import org.apache.aurora.scheduler.state.UUIDGenerator.UUIDGeneratorImpl;
  */
 public class StateModule extends AbstractModule {
 
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-task_assigner_modules",
+        description = "Guice modules for customizing task assignment.",
+        splitter = CommaSplitter.class)
+    @SuppressWarnings("rawtypes")
+    public List<Class> taskAssignerModules = ImmutableList.of(TaskAssignerImplModule.class);
+  }
+
+  private final CliOptions options;
+
+  public StateModule(CliOptions options) {
+    this.options = options;
+  }
+
   @Override
   protected void configure() {
-    bind(TaskAssigner.class).to(TaskAssignerImpl.class);
-    bind(TaskAssignerImpl.class).in(Singleton.class);
+    for (Module module : MoreModules.instantiateAll(options.state.taskAssignerModules, options)) {
+      install(module);
+    }
     bind(MesosTaskFactory.class).to(MesosTaskFactoryImpl.class);
 
     bind(StateManager.class).to(StateManagerImpl.class);
@@ -42,8 +66,8 @@ public class StateModule extends AbstractModule {
 
     bind(UUIDGenerator.class).to(UUIDGeneratorImpl.class);
     bind(UUIDGeneratorImpl.class).in(Singleton.class);
-    bind(LockManager.class).to(LockManagerImpl.class);
-    bind(LockManagerImpl.class).in(Singleton.class);
+
+    PubsubEventModule.bindSubscriber(binder(), PartitionManager.class);
 
     bindMaintenanceController(binder());
   }

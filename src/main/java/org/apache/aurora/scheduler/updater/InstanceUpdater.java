@@ -13,10 +13,9 @@
  */
 package org.apache.aurora.scheduler.updater;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
+
 import com.google.common.base.Preconditions;
-import com.google.common.base.Predicates;
-import com.google.common.collect.Iterables;
 
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
@@ -25,7 +24,6 @@ import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.aurora.scheduler.storage.entities.ITaskEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,10 +31,12 @@ import static java.util.Objects.requireNonNull;
 
 import static org.apache.aurora.gen.ScheduleStatus.KILLING;
 import static org.apache.aurora.gen.ScheduleStatus.RUNNING;
+import static org.apache.aurora.scheduler.resources.ResourceManager.bagFromResources;
 import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.EVALUATE_AFTER_MIN_RUNNING_MS;
 import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.EVALUATE_ON_STATE_CHANGE;
 import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.FAILED_TERMINATED;
 import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.KILL_TASK_AND_EVALUATE_ON_STATE_CHANGE;
+import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.KILL_TASK_WITH_RESERVATION_AND_EVALUATE_ON_STATE_CHANGE;
 import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.REPLACE_TASK_AND_EVALUATE_ON_STATE_CHANGE;
 import static org.apache.aurora.scheduler.updater.StateEvaluator.Result.SUCCEEDED;
 
@@ -73,10 +73,8 @@ class InstanceUpdater implements StateEvaluator<Optional<IScheduledTask>> {
   }
 
   private static boolean isPermanentlyKilled(IScheduledTask task) {
-    boolean wasKilling =
-        Iterables.any(
-            task.getTaskEvents(),
-            Predicates.compose(Predicates.equalTo(KILLING), ITaskEvent::getStatus));
+    boolean wasKilling = task.getTaskEvents().stream()
+        .anyMatch(event -> event.getStatus() == KILLING);
     return task.getStatus() != KILLING && wasKilling;
   }
 
@@ -89,7 +87,7 @@ class InstanceUpdater implements StateEvaluator<Optional<IScheduledTask>> {
   }
 
   @Override
-  public synchronized StateEvaluator.Result evaluate(Optional<IScheduledTask> actualState) {
+  public synchronized Result evaluate(Optional<IScheduledTask> actualState) {
     boolean desiredPresent = desiredState.isPresent();
     boolean actualPresent = isTaskPresent(actualState);
 
@@ -116,7 +114,16 @@ class InstanceUpdater implements StateEvaluator<Optional<IScheduledTask>> {
     return observedFailures > toleratedFailures;
   }
 
-  private StateEvaluator.Result handleActualAndDesiredPresent(IScheduledTask actualState) {
+  private boolean resourceFits(ITaskConfig desired, ITaskConfig existing) {
+    return bagFromResources(existing.getResources())
+        .greaterThanOrEqualTo(bagFromResources(desired.getResources()));
+  }
+
+  private boolean constraintsMatch(ITaskConfig desired, ITaskConfig existing) {
+    return desired.getConstraints().equals(existing.getConstraints());
+  }
+
+  private Result handleActualAndDesiredPresent(IScheduledTask actualState) {
     Preconditions.checkState(desiredState.isPresent());
     Preconditions.checkArgument(!actualState.getTaskEvents().isEmpty());
 
@@ -144,7 +151,14 @@ class InstanceUpdater implements StateEvaluator<Optional<IScheduledTask>> {
       // This is not the configuration that we would like to run.
       if (isKillable(status)) {
         // Task is active, kill it.
-        return KILL_TASK_AND_EVALUATE_ON_STATE_CHANGE;
+        if (resourceFits(desiredState.get(), actualState.getAssignedTask().getTask())
+            && constraintsMatch(desiredState.get(), actualState.getAssignedTask().getTask())) {
+          // If the desired task fits into the existing offer, we reserve the offer.
+          return KILL_TASK_WITH_RESERVATION_AND_EVALUATE_ON_STATE_CHANGE;
+        } else {
+          // The resource requirements have increased, force fresh scheduling attempt.
+          return KILL_TASK_AND_EVALUATE_ON_STATE_CHANGE;
+        }
       } else if (Tasks.isTerminated(status) && isPermanentlyKilled(actualState)) {
         // The old task has exited, it is now safe to add the new one.
         return REPLACE_TASK_AND_EVALUATE_ON_STATE_CHANGE;

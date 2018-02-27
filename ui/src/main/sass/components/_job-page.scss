@@ -1,0 +1,136 @@
+.job-page {
+  .cron-job-preview {
+    padding: 15px;
+  }
+
+  .job-overview {
+    .tab-navigation {
+      background-color: rgba(0, 0, 0, 0.01);
+      list-style-type: none;
+      padding: 0;
+      margin: 0;
+
+      li {
+        cursor: hand;
+        cursor: pointer;
+        font-weight: 700;
+        padding: 15px 20px;
+        font-size: 18px;
+        color: $secondary_font_color;
+        display: inline-block;
+      }
+
+      li.active {
+        cursor: default;
+        color: #555;
+        background-color: $content_box_color;
+      }
+    }
+
+    .content-panel-group {
+      margin: 0 !important;
+    }
+  }
+
+  .task-status-tabs {
+    .tab-navigation {
+      border: 0;
+      background-color: $content_box_color;
+      margin-bottom: 10px;
+
+      .glyphicon {
+        font-size: 0.8em;
+        margin-right: 5px;
+      }
+
+      li {
+        padding: 5px 15px 0px 15px;
+        text-transform: uppercase;
+        font-size: 14px;
+      }
+
+      li.active {
+        color: steelblue;
+        border: 0;
+      }
+    }
+  }
+
+  .job-configuration-summaries {
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 13px;
+
+    .task-config-summary {
+      width: 350px;
+      border: 1px solid $grid_color;
+      margin-right: 20px;
+      margin-bottom: 20px;
+
+      .task-constraint, .task-metadata {
+        display: block;
+      }
+
+      .task-metadata + .task-metadata {
+        margin: 5px 0px;
+      }
+    }
+
+    .cron-config-summary {
+      width: 500px !important;
+    }
+
+    tr:first-child {
+      background-color: $grid_color;
+    }
+
+    th {
+      text-transform: uppercase;
+    }
+
+    td {
+      max-width: 250px;
+      overflow: auto;
+    }
+  }
+
+  .update-preview {
+    padding: 20px;
+    color: white;
+    align-items: center;
+    display: flex;
+    justify-content: space-between;
+
+    &.in-progress {
+      background-color: $colors_highlight;
+    }
+
+    &.attention {
+      background-color: $colors_warning;
+    }
+
+    &.okay {
+      background-color: $colors_success;
+    }
+
+    &.error {
+      background-color: $colors_error;
+    }
+
+    a {
+      color: white;
+      font-size: 30px;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .update-preview-details {
+      text-transform: uppercase;
+    }
+
+    .update-preview-progress {
+      font-weight: 700;
+      font-size: 24px;
+    }
+  }
+}

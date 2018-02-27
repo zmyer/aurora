@@ -14,13 +14,14 @@
 package org.apache.aurora.scheduler;
 
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Predicate;
 import com.google.common.base.Strings;
 import com.google.common.base.Supplier;
@@ -40,7 +41,6 @@ import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.events.PubsubEvent.EventSubscriber;
 import org.apache.aurora.scheduler.events.PubsubEvent.TaskStateChange;
 import org.apache.aurora.scheduler.events.PubsubEvent.TasksDeleted;
-import org.apache.aurora.scheduler.events.PubsubEvent.Vetoed;
 import org.apache.aurora.scheduler.filter.SchedulingFilter.Veto;
 import org.apache.aurora.scheduler.filter.SchedulingFilter.VetoGroup;
 import org.apache.aurora.scheduler.filter.SchedulingFilter.VetoType;
@@ -56,7 +56,7 @@ import static java.util.Objects.requireNonNull;
 /**
  * A container that tracks and exports stat counters for tasks.
  */
-class TaskVars extends AbstractIdleService implements EventSubscriber {
+public class TaskVars extends AbstractIdleService implements EventSubscriber {
   private static final Logger LOG = LoggerFactory.getLogger(TaskVars.class);
   private static final ImmutableSet<ScheduleStatus> TRACKED_JOB_STATES =
       ImmutableSet.of(ScheduleStatus.LOST, ScheduleStatus.FAILED);
@@ -142,13 +142,14 @@ class TaskVars extends AbstractIdleService implements EventSubscriber {
     final String host = task.getAssignedTask().getSlaveHost();
     Optional<String> rack;
     if (Strings.isNullOrEmpty(task.getAssignedTask().getSlaveHost())) {
-      rack = Optional.absent();
+      rack = Optional.empty();
     } else {
       rack = storage.read(storeProvider -> {
         Optional<IAttribute> rack1 = FluentIterable
             .from(AttributeStore.Util.attributesOrNone(storeProvider, host))
-            .firstMatch(IS_RACK);
-        return rack1.transform(ATTR_VALUE);
+            .firstMatch(IS_RACK)
+            .toJavaUtil();
+        return rack1.map(ATTR_VALUE);
       });
     }
 
@@ -221,13 +222,12 @@ class TaskVars extends AbstractIdleService implements EventSubscriber {
     }
   }
 
-  @Subscribe
-  public void taskVetoed(Vetoed event) {
-    VetoGroup vetoGroup = Veto.identifyGroup(event.getVetoes());
+  public void taskVetoed(Set<Veto> vetoes) {
+    VetoGroup vetoGroup = Veto.identifyGroup(vetoes);
     if (vetoGroup != VetoGroup.EMPTY) {
       counters.getUnchecked(VETO_GROUPS_TO_COUNTERS.get(vetoGroup)).increment();
     }
-    for (Veto veto : event.getVetoes()) {
+    for (Veto veto : vetoes) {
       counters.getUnchecked(VETO_TYPE_TO_COUNTERS.get(veto.getVetoType())).increment();
     }
   }

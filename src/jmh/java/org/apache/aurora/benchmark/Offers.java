@@ -22,12 +22,12 @@ import com.google.common.collect.Iterables;
 
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Data;
-import org.apache.aurora.scheduler.HostOffer;
 import org.apache.aurora.scheduler.base.Numbers;
+import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
 import org.apache.aurora.scheduler.resources.ResourceType;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
-import org.apache.mesos.Protos;
+import org.apache.mesos.v1.Protos;
 
 import static org.apache.aurora.scheduler.resources.ResourceType.CPUS;
 import static org.apache.aurora.scheduler.resources.ResourceType.DISK_MB;
@@ -50,7 +50,7 @@ final class Offers {
    */
   static void addOffers(OfferManager offerManager, Iterable<HostOffer> offers) {
     for (HostOffer offer : offers) {
-      offerManager.addOffer(offer);
+      offerManager.add(offer);
     }
   }
 
@@ -106,7 +106,7 @@ final class Offers {
                     IntStream.range(1, ports).boxed().collect(Collectors.toSet()))))
             .setId(Protos.OfferID.newBuilder().setValue(String.format(OFFER_ID_FORMAT, id++)))
             .setFrameworkId(Protos.FrameworkID.newBuilder().setValue(FRAMEWORK_ID))
-            .setSlaveId(Protos.SlaveID.newBuilder().setValue(attributes.getSlaveId()))
+            .setAgentId(Protos.AgentID.newBuilder().setValue(attributes.getSlaveId()))
             .setHostname(String.format(attributes.getHost()))
             .build();
 

@@ -14,20 +14,18 @@
 package org.apache.aurora.scheduler.events;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Optional;
 import com.google.gson.Gson;
 
 import org.apache.aurora.gen.ScheduleStatus;
-import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.base.Tasks;
-import org.apache.aurora.scheduler.filter.SchedulingFilter.Veto;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
-import org.apache.mesos.Protos;
-import org.apache.mesos.Protos.TaskStatus;
+import org.apache.mesos.v1.Protos;
+import org.apache.mesos.v1.Protos.TaskStatus;
 
 import static java.util.Objects.requireNonNull;
 
@@ -100,7 +98,7 @@ public interface PubsubEvent {
      * @return A state change event.
      */
     public static TaskStateChange initialized(IScheduledTask task) {
-      return new TaskStateChange(task, Optional.absent());
+      return new TaskStateChange(task, Optional.empty());
     }
 
     /**
@@ -198,51 +196,6 @@ public interface PubsubEvent {
     public String toString() {
       return MoreObjects.toStringHelper(this)
           .add("attributes", getAttributes())
-          .toString();
-    }
-  }
-
-  /**
-   * Event sent when a scheduling assignment was vetoed.
-   */
-  class Vetoed implements PubsubEvent {
-    private final TaskGroupKey groupKey;
-    private final Set<Veto> vetoes;
-
-    public Vetoed(TaskGroupKey groupKey, Set<Veto> vetoes) {
-      this.groupKey = requireNonNull(groupKey);
-      this.vetoes = requireNonNull(vetoes);
-    }
-
-    public TaskGroupKey getGroupKey() {
-      return groupKey;
-    }
-
-    public Set<Veto> getVetoes() {
-      return vetoes;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-      if (!(o instanceof Vetoed)) {
-        return false;
-      }
-
-      Vetoed other = (Vetoed) o;
-      return Objects.equals(groupKey, other.groupKey)
-          && Objects.equals(vetoes, other.vetoes);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(groupKey, vetoes);
-    }
-
-    @Override
-    public String toString() {
-      return MoreObjects.toStringHelper(this)
-          .add("groupKey", groupKey)
-          .add("vetoes", vetoes)
           .toString();
     }
   }

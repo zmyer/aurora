@@ -14,7 +14,6 @@
 package org.apache.aurora.scheduler.app;
 
 import java.net.InetSocketAddress;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -22,6 +21,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import javax.inject.Inject;
 
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -34,12 +35,6 @@ import com.google.inject.util.Modules;
 
 import org.apache.aurora.GuavaUtils.ServiceManagerIface;
 import org.apache.aurora.common.application.Lifecycle;
-import org.apache.aurora.common.args.Arg;
-import org.apache.aurora.common.args.ArgScanner;
-import org.apache.aurora.common.args.ArgScanner.ArgScanException;
-import org.apache.aurora.common.args.CmdLine;
-import org.apache.aurora.common.args.constraints.NotEmpty;
-import org.apache.aurora.common.args.constraints.NotNull;
 import org.apache.aurora.common.inject.Bindings;
 import org.apache.aurora.common.stats.Stats;
 import org.apache.aurora.common.zookeeper.SingletonService;
@@ -48,6 +43,9 @@ import org.apache.aurora.gen.ServerInfo;
 import org.apache.aurora.scheduler.AppStartup;
 import org.apache.aurora.scheduler.SchedulerLifecycle;
 import org.apache.aurora.scheduler.TierModule;
+import org.apache.aurora.scheduler.config.CliOptions;
+import org.apache.aurora.scheduler.config.CommandLine;
+import org.apache.aurora.scheduler.config.validators.NotEmptyString;
 import org.apache.aurora.scheduler.configuration.executor.ExecutorModule;
 import org.apache.aurora.scheduler.cron.quartz.CronModule;
 import org.apache.aurora.scheduler.discovery.FlaggedZooKeeperConfig;
@@ -56,14 +54,17 @@ import org.apache.aurora.scheduler.events.WebhookModule;
 import org.apache.aurora.scheduler.http.HttpService;
 import org.apache.aurora.scheduler.log.mesos.MesosLogStreamModule;
 import org.apache.aurora.scheduler.mesos.CommandLineDriverSettingsModule;
+import org.apache.aurora.scheduler.mesos.FrameworkInfoFactory.FrameworkInfoFactoryImpl.SchedulerProtocol;
 import org.apache.aurora.scheduler.mesos.LibMesosLoadingModule;
 import org.apache.aurora.scheduler.stats.StatsModule;
-import org.apache.aurora.scheduler.storage.Storage;
+import org.apache.aurora.scheduler.storage.Storage.Volatile;
 import org.apache.aurora.scheduler.storage.backup.BackupModule;
-import org.apache.aurora.scheduler.storage.db.DbModule;
+import org.apache.aurora.scheduler.storage.durability.DurableStorageModule;
 import org.apache.aurora.scheduler.storage.entities.IServerInfo;
-import org.apache.aurora.scheduler.storage.log.LogStorageModule;
-import org.apache.aurora.scheduler.storage.log.SnapshotStoreImpl;
+import org.apache.aurora.scheduler.storage.log.LogPersistenceModule;
+import org.apache.aurora.scheduler.storage.log.SnapshotModule;
+import org.apache.aurora.scheduler.storage.log.SnapshotterImpl;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,25 +74,67 @@ import org.slf4j.LoggerFactory;
 public class SchedulerMain {
   private static final Logger LOG = LoggerFactory.getLogger(SchedulerMain.class);
 
-  @NotNull
-  @CmdLine(name = "cluster_name", help = "Name to identify the cluster being served.")
-  private static final Arg<String> CLUSTER_NAME = Arg.create();
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-cluster_name",
+        required = true,
+        description = "Name to identify the cluster being served.")
+    public String clusterName;
 
-  @NotNull
-  @NotEmpty
-  @CmdLine(name = "serverset_path", help = "ZooKeeper ServerSet path to register at.")
-  private static final Arg<String> SERVERSET_PATH = Arg.create();
+    @Parameter(
+        names = "-serverset_path",
+        required = true,
+        validateValueWith = NotEmptyString.class,
+        description = "ZooKeeper ServerSet path to register at.")
+    public String serversetPath;
 
-  @CmdLine(name = "serverset_endpoint_name",
-      help = "Name of the scheduler endpoint published in ZooKeeper.")
-  private static final Arg<String> SERVERSET_ENDPOINT_NAME = Arg.create("http");
+    // TODO(zmanji): Consider making this an enum of HTTP or HTTPS.
+    @Parameter(names = "-serverset_endpoint_name",
+        description = "Name of the scheduler endpoint published in ZooKeeper.")
+    public String serversetEndpointName = "http";
 
-  // TODO(Suman Karumuri): Rename viz_job_url_prefix to stats_job_url_prefix for consistency.
-  @CmdLine(name = "viz_job_url_prefix", help = "URL prefix for job container stats.")
-  private static final Arg<String> STATS_URL_PREFIX = Arg.create("");
+    // TODO(Suman Karumuri): Rename viz_job_url_prefix to stats_job_url_prefix for consistency.
+    @Parameter(names = "-viz_job_url_prefix", description = "URL prefix for job container stats.")
+    public String statsUrlPrefix = "";
 
-  @CmdLine(name = "allow_gpu_resource", help = "Allow jobs to request Mesos GPU resource.")
-  private static final Arg<Boolean> ALLOW_GPU_RESOURCE = Arg.create(false);
+    @Parameter(names = "-allow_gpu_resource",
+        description = "Allow jobs to request Mesos GPU resource.",
+        arity = 1)
+    public boolean allowGpuResource = false;
+
+    public enum DriverKind {
+      // TODO(zmanji): Remove this option once V0_DRIVER has been proven out in production.
+      // This is the original driver that libmesos shipped with. Uses unversioned protobufs, and has
+      // minimal backwards compatability guarantees.
+      SCHEDULER_DRIVER,
+      // These are the new drivers that libmesos ships with. They use versioned (V1) protobufs for
+      // the Java API.
+      // V0 Driver offers the V1 API over the old Scheduler Driver. It does not fully support
+      // the V1 API (ie mesos maintenance).
+      V0_DRIVER,
+      // V1 Driver offers the V1 API over a full HTTP API implementation. It allows for maintenance
+      // primatives and other new features.
+      V1_DRIVER,
+    }
+
+    @Parameter(names = "-mesos_driver", description = "Which Mesos Driver to use")
+    public DriverKind driverImpl = DriverKind.SCHEDULER_DRIVER;
+  }
+
+  public static class ProtocolModule extends AbstractModule {
+    private final Options options;
+
+    public ProtocolModule(Options options) {
+      this.options = options;
+    }
+
+    @Override
+    protected void configure() {
+      bind(String.class)
+          .annotatedWith(SchedulerProtocol.class)
+          .toInstance(options.serversetEndpointName);
+    }
+  }
 
   @Inject private SingletonService schedulerService;
   @Inject private HttpService httpService;
@@ -111,41 +154,41 @@ public class SchedulerMain {
     appLifecycle.shutdown();
   }
 
-  void run() {
-    startupServices.startAsync();
-    Runtime.getRuntime().addShutdownHook(new Thread(SchedulerMain.this::stop, "ShutdownHook"));
-    startupServices.awaitHealthy();
-
-    LeadershipListener leaderListener = schedulerLifecycle.prepare();
-
-    HostAndPort httpAddress = httpService.getAddress();
-    InetSocketAddress httpSocketAddress =
-        InetSocketAddress.createUnresolved(httpAddress.getHost(), httpAddress.getPort());
+  void run(Options options) {
     try {
+      startupServices.startAsync();
+      Runtime.getRuntime().addShutdownHook(new Thread(SchedulerMain.this::stop, "ShutdownHook"));
+      startupServices.awaitHealthy();
+
+      LeadershipListener leaderListener = schedulerLifecycle.prepare();
+
+      HostAndPort httpAddress = httpService.getAddress();
+      InetSocketAddress httpSocketAddress =
+          InetSocketAddress.createUnresolved(httpAddress.getHost(), httpAddress.getPort());
+
       schedulerService.lead(
           httpSocketAddress,
-          ImmutableMap.of(SERVERSET_ENDPOINT_NAME.get(), httpSocketAddress),
+          ImmutableMap.of(options.serversetEndpointName, httpSocketAddress),
           leaderListener);
     } catch (SingletonService.LeadException e) {
       throw new IllegalStateException("Failed to lead service.", e);
     } catch (InterruptedException e) {
       throw new IllegalStateException("Interrupted while joining scheduler service group.", e);
+    } finally {
+      appLifecycle.awaitShutdown();
+      stop();
     }
-
-    appLifecycle.awaitShutdown();
-    stop();
   }
 
   @VisibleForTesting
-  static Module getUniversalModule() {
+  static Module getUniversalModule(CliOptions options) {
     return Modules.combine(
+        new ProtocolModule(options.main),
         new LifecycleModule(),
-        new StatsModule(),
-        new AppModule(ALLOW_GPU_RESOURCE.get()),
-        new CronModule(),
-        new DbModule.MigrationManagerModule(),
-        DbModule.productionModule(Bindings.annotatedKeyFactory(Storage.Volatile.class)),
-        new DbModule.GarbageCollectorModule());
+        new StatsModule(options.stats),
+        new AppModule(options),
+        new CronModule(options.cron),
+        new MemStorageModule(Bindings.annotatedKeyFactory(Volatile.class)));
   }
 
   /**
@@ -155,27 +198,31 @@ public class SchedulerMain {
    * @param appEnvironmentModule Additional modules based on the execution environment.
    */
   @VisibleForTesting
-  public static void flagConfiguredMain(Module appEnvironmentModule) {
+  public static void flagConfiguredMain(CliOptions options, Module appEnvironmentModule) {
     AtomicLong uncaughtExceptions = Stats.exportLong("uncaught_exceptions");
     Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
       uncaughtExceptions.incrementAndGet();
+
       LOG.error("Uncaught exception from " + t + ":" + e, e);
     });
 
     Module module = Modules.combine(
         appEnvironmentModule,
-        getUniversalModule(),
-        new ServiceDiscoveryModule(FlaggedZooKeeperConfig.create(), SERVERSET_PATH.get()),
-        new BackupModule(SnapshotStoreImpl.class),
-        new ExecutorModule(),
+        getUniversalModule(options),
+        new ServiceDiscoveryModule(
+            FlaggedZooKeeperConfig.create(options.zk),
+            options.main.serversetPath),
+        new BackupModule(options.backup, SnapshotterImpl.class),
+        new ExecutorModule(options.executor),
         new AbstractModule() {
           @Override
           protected void configure() {
+            bind(CliOptions.class).toInstance(options);
             bind(IServerInfo.class).toInstance(
                 IServerInfo.build(
                     new ServerInfo()
-                        .setClusterName(CLUSTER_NAME.get())
-                        .setStatsUrlPrefix(STATS_URL_PREFIX.get())));
+                        .setClusterName(options.main.clusterName)
+                        .setStatsUrlPrefix(options.main.statsUrlPrefix)));
           }
         });
 
@@ -186,7 +233,7 @@ public class SchedulerMain {
       SchedulerMain scheduler = new SchedulerMain();
       injector.injectMembers(scheduler);
       try {
-        scheduler.run();
+        scheduler.run(options.main);
       } finally {
         LOG.info("Application run() exited.");
       }
@@ -198,42 +245,20 @@ public class SchedulerMain {
   }
 
   public static void main(String... args) {
-    applyStaticArgumentValues(args);
+    CliOptions options = CommandLine.parseOptions(args);
 
     List<Module> modules = ImmutableList.<Module>builder()
         .add(
-            new CommandLineDriverSettingsModule(ALLOW_GPU_RESOURCE.get()),
-            new LibMesosLoadingModule(),
-            new MesosLogStreamModule(FlaggedZooKeeperConfig.create()),
-            new LogStorageModule(),
-            new TierModule(),
-            new WebhookModule()
+            new CommandLineDriverSettingsModule(options.driver, options.main.allowGpuResource),
+            new LibMesosLoadingModule(options.main.driverImpl),
+            new DurableStorageModule(),
+            new MesosLogStreamModule(options.mesosLog, FlaggedZooKeeperConfig.create(options.zk)),
+            new LogPersistenceModule(options.logPersistence),
+            new SnapshotModule(options.snapshot),
+            new TierModule(options.tiers),
+            new WebhookModule(options.webhook)
         )
         .build();
-    flagConfiguredMain(Modules.combine(modules));
-  }
-
-  private static void exit(String message, Exception error) {
-    LOG.error(message + "\n" + error, error);
-    System.exit(1);
-  }
-
-  /**
-   * Applies {@link CmdLine} arg values throughout the classpath.  This must be invoked before
-   * attempting to read any argument values in the system.
-   *
-   * @param args Command line arguments.
-   */
-  @VisibleForTesting
-  public static void applyStaticArgumentValues(String... args) {
-    try {
-      if (!new ArgScanner().parse(Arrays.asList(args))) {
-        System.exit(0);
-      }
-    } catch (ArgScanException e) {
-      exit("Failed to scan arguments", e);
-    } catch (IllegalArgumentException e) {
-      exit("Failed to apply arguments", e);
-    }
+    flagConfiguredMain(options, Modules.combine(modules));
   }
 }

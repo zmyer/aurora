@@ -17,10 +17,9 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.Optional;
 
 import javax.inject.Qualifier;
-
-import com.google.common.base.Optional;
 
 import org.apache.aurora.scheduler.base.Query.Builder;
 import org.apache.aurora.scheduler.base.SchedulerException;
@@ -32,16 +31,23 @@ import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
  */
 public interface Storage {
 
+  /**
+   * Provider for read-only stores.  Store implementations must be thread-safe, and should support
+   * concurrent reads where appropriate.
+   */
   interface StoreProvider {
     SchedulerStore getSchedulerStore();
     CronJobStore getCronJobStore();
     TaskStore getTaskStore();
-    LockStore getLockStore();
     QuotaStore getQuotaStore();
     AttributeStore getAttributeStore();
     JobUpdateStore getJobUpdateStore();
   }
 
+  /**
+   * Provider for stores that permit mutations.  Store implementations need not support concurrent
+   * writes, as a global reentrant write lock is used to serialize write operations.
+   */
   interface MutableStoreProvider extends StoreProvider {
     SchedulerStore.Mutable getSchedulerStore();
     CronJobStore.Mutable getCronJobStore();
@@ -61,23 +67,9 @@ public interface Storage {
      */
     TaskStore.Mutable getUnsafeTaskStore();
 
-    LockStore.Mutable getLockStore();
     QuotaStore.Mutable getQuotaStore();
     AttributeStore.Mutable getAttributeStore();
     JobUpdateStore.Mutable getJobUpdateStore();
-
-    /**
-     * Gets direct low level access to the underlying storage.
-     * <p>
-     * This grants a potentially dangerous direct access to the underlying storage and should
-     * only be used during storage initialization when unstructured bulk data manipulations
-     * are required.
-     * </p>
-     *
-     * @param <T> Direct access type.
-     * @return Direct read/write accessor to the storage.
-     */
-    <T> T getUnsafeStoreAccess();
   }
 
   /**
@@ -190,6 +182,10 @@ public interface Storage {
    * Indicates that stable storage is temporarily unavailable.
    */
   class TransientStorageException extends StorageException {
+    public TransientStorageException(String message, Throwable cause) {
+      super(message, cause);
+    }
+
     public TransientStorageException(String message) {
       super(message);
     }
@@ -198,10 +194,6 @@ public interface Storage {
   /**
    * Executes the unit of read-only {@code work}.  The consistency model creates the possibility
    * for a reader to read uncommitted state from a concurrent writer.
-   * <p>
-   * TODO(wfarner): Update this documentation once all stores are backed by
-   * {@link org.apache.aurora.scheduler.storage.db.DbStorage}, as the concurrency behavior will then
-   * be dictated by the {@link org.mybatis.guice.transactional.Transactional#isolation()} used.
    * <p>
    * TODO(wfarner): This method no longer needs to exist now that there is no global locking for
    * reads.  We could instead directly inject the individual stores where they are used, as long
@@ -254,12 +246,6 @@ public interface Storage {
      * @throws StorageException if there was a starting storage.
      */
     void start(MutateWork.NoResult.Quiet initializationLogic) throws StorageException;
-
-    /**
-     * Clean up the underlying storage by optimizing internal data structures. Does not change
-     * externally-visible state but might not run concurrently with write operations.
-     */
-    void snapshot() throws StorageException;
 
     /**
      * Prepares the underlying storage system for clean shutdown.

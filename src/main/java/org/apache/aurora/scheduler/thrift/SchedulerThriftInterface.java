@@ -16,6 +16,7 @@ package org.apache.aurora.scheduler.thrift;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -23,22 +24,20 @@ import javax.annotation.Nullable;
 import javax.inject.Inject;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ContiguousSet;
 import com.google.common.collect.DiscreteDomain;
-import com.google.common.collect.FluentIterable;
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.Range;
+import com.google.common.collect.Sets;
 
 import org.apache.aurora.common.stats.StatsProvider;
-import org.apache.aurora.gen.ConfigRewrite;
 import org.apache.aurora.gen.DrainHostsResult;
 import org.apache.aurora.gen.EndMaintenanceResult;
 import org.apache.aurora.gen.ExplicitReconciliationSettings;
@@ -56,7 +55,6 @@ import org.apache.aurora.gen.JobUpdateRequest;
 import org.apache.aurora.gen.JobUpdateSettings;
 import org.apache.aurora.gen.JobUpdateSummary;
 import org.apache.aurora.gen.ListBackupsResult;
-import org.apache.aurora.gen.LockKey;
 import org.apache.aurora.gen.MaintenanceStatusResult;
 import org.apache.aurora.gen.PulseJobUpdateResult;
 import org.apache.aurora.gen.QueryRecoveryResult;
@@ -64,12 +62,10 @@ import org.apache.aurora.gen.ReadOnlyScheduler;
 import org.apache.aurora.gen.ResourceAggregate;
 import org.apache.aurora.gen.Response;
 import org.apache.aurora.gen.Result;
-import org.apache.aurora.gen.RewriteConfigsRequest;
 import org.apache.aurora.gen.ScheduleStatus;
 import org.apache.aurora.gen.StartJobUpdateResult;
 import org.apache.aurora.gen.StartMaintenanceResult;
 import org.apache.aurora.gen.TaskQuery;
-import org.apache.aurora.scheduler.TaskIdGenerator;
 import org.apache.aurora.scheduler.base.JobKeys;
 import org.apache.aurora.scheduler.base.Numbers;
 import org.apache.aurora.scheduler.base.Query;
@@ -84,43 +80,35 @@ import org.apache.aurora.scheduler.quota.QuotaCheckResult;
 import org.apache.aurora.scheduler.quota.QuotaManager;
 import org.apache.aurora.scheduler.quota.QuotaManager.QuotaException;
 import org.apache.aurora.scheduler.reconciliation.TaskReconciler;
-import org.apache.aurora.scheduler.state.LockManager;
-import org.apache.aurora.scheduler.state.LockManager.LockException;
 import org.apache.aurora.scheduler.state.MaintenanceController;
 import org.apache.aurora.scheduler.state.StateChangeResult;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.state.UUIDGenerator;
-import org.apache.aurora.scheduler.storage.CronJobStore;
-import org.apache.aurora.scheduler.storage.Storage.MutableStoreProvider;
+import org.apache.aurora.scheduler.storage.SnapshotStore;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
 import org.apache.aurora.scheduler.storage.Storage.NonVolatileStorage;
 import org.apache.aurora.scheduler.storage.Storage.StoreProvider;
 import org.apache.aurora.scheduler.storage.backup.Recovery;
 import org.apache.aurora.scheduler.storage.backup.StorageBackup;
-import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
-import org.apache.aurora.scheduler.storage.entities.IConfigRewrite;
+import org.apache.aurora.scheduler.storage.durability.ThriftBackfill;
 import org.apache.aurora.scheduler.storage.entities.IHostStatus;
-import org.apache.aurora.scheduler.storage.entities.IInstanceConfigRewrite;
-import org.apache.aurora.scheduler.storage.entities.IInstanceKey;
-import org.apache.aurora.scheduler.storage.entities.IJobConfigRewrite;
 import org.apache.aurora.scheduler.storage.entities.IJobConfiguration;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdate;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateRequest;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateSettings;
-import org.apache.aurora.scheduler.storage.entities.ILockKey;
 import org.apache.aurora.scheduler.storage.entities.IMetadata;
 import org.apache.aurora.scheduler.storage.entities.IRange;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
 import org.apache.aurora.scheduler.thrift.aop.AnnotatedAuroraAdmin;
 import org.apache.aurora.scheduler.thrift.aop.ThriftWorkload;
 import org.apache.aurora.scheduler.thrift.auth.DecoratedThrift;
 import org.apache.aurora.scheduler.updater.JobDiff;
 import org.apache.aurora.scheduler.updater.JobUpdateController;
 import org.apache.aurora.scheduler.updater.JobUpdateController.AuditData;
+import org.apache.aurora.scheduler.updater.JobUpdateController.JobUpdatingException;
 import org.apache.aurora.scheduler.updater.UpdateInProgressException;
 import org.apache.aurora.scheduler.updater.UpdateStateException;
 import org.apache.thrift.TException;
@@ -131,12 +119,12 @@ import static java.util.Objects.requireNonNull;
 
 import static org.apache.aurora.common.base.MorePreconditions.checkNotBlank;
 import static org.apache.aurora.gen.ResponseCode.INVALID_REQUEST;
-import static org.apache.aurora.gen.ResponseCode.LOCK_ERROR;
+import static org.apache.aurora.gen.ResponseCode.JOB_UPDATING_ERROR;
 import static org.apache.aurora.gen.ResponseCode.OK;
-import static org.apache.aurora.gen.ResponseCode.WARNING;
 import static org.apache.aurora.scheduler.base.Numbers.convertRanges;
 import static org.apache.aurora.scheduler.base.Numbers.toRanges;
 import static org.apache.aurora.scheduler.base.Tasks.ACTIVE_STATES;
+import static org.apache.aurora.scheduler.base.Tasks.TERMINAL_STATES;
 import static org.apache.aurora.scheduler.quota.QuotaCheckResult.Result.INSUFFICIENT_QUOTA;
 import static org.apache.aurora.scheduler.thrift.Responses.addMessage;
 import static org.apache.aurora.scheduler.thrift.Responses.empty;
@@ -153,11 +141,6 @@ import static org.apache.aurora.scheduler.thrift.Responses.ok;
 @DecoratedThrift
 class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
 
-  // This number is derived from the maximum file name length limit on most UNIX systems, less
-  // the number of characters we've observed being added by mesos for the executor ID, prefix, and
-  // delimiters.
-  @VisibleForTesting
-  static final int MAX_TASK_ID_LENGTH = 255 - 90;
   @VisibleForTesting
   static final String STAT_PREFIX = "thrift_workload_";
   @VisibleForTesting
@@ -177,25 +160,24 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
   @VisibleForTesting
   static final String END_MAINTENANCE = STAT_PREFIX + "endMaintenance";
   @VisibleForTesting
-  static final String REWRITE_CONFIGS = STAT_PREFIX + "rewriteConfigs";
-  @VisibleForTesting
   static final String ADD_INSTANCES = STAT_PREFIX + "addInstances";
   @VisibleForTesting
   static final String START_JOB_UPDATE = STAT_PREFIX + "startJobUpdate";
+  @VisibleForTesting
+  static final String PRUNE_TASKS = STAT_PREFIX + "pruneTasks";
 
   private static final Logger LOG = LoggerFactory.getLogger(SchedulerThriftInterface.class);
 
   private final ConfigurationManager configurationManager;
   private final Thresholds thresholds;
   private final NonVolatileStorage storage;
-  private final LockManager lockManager;
+  private final SnapshotStore snapshotStore;
   private final StorageBackup backup;
   private final Recovery recovery;
   private final MaintenanceController maintenance;
   private final CronJobManager cronJobManager;
   private final QuotaManager quotaManager;
   private final StateManager stateManager;
-  private final TaskIdGenerator taskIdGenerator;
   private final UUIDGenerator uuidGenerator;
   private final JobUpdateController jobUpdateController;
   private final ReadOnlyScheduler.Iface readOnlyScheduler;
@@ -210,23 +192,22 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
   private final AtomicLong drainHostsCounter;
   private final AtomicLong maintenanceStatusCounter;
   private final AtomicLong endMaintenanceCounter;
-  private final AtomicLong rewriteConfigsCounter;
   private final AtomicLong addInstancesCounter;
   private final AtomicLong startJobUpdateCounter;
+  private final AtomicLong pruneTasksCounter;
 
   @Inject
   SchedulerThriftInterface(
       ConfigurationManager configurationManager,
       Thresholds thresholds,
       NonVolatileStorage storage,
-      LockManager lockManager,
+      SnapshotStore snapshotStore,
       StorageBackup backup,
       Recovery recovery,
       CronJobManager cronJobManager,
       MaintenanceController maintenance,
       QuotaManager quotaManager,
       StateManager stateManager,
-      TaskIdGenerator taskIdGenerator,
       UUIDGenerator uuidGenerator,
       JobUpdateController jobUpdateController,
       ReadOnlyScheduler.Iface readOnlyScheduler,
@@ -237,14 +218,13 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     this.configurationManager = requireNonNull(configurationManager);
     this.thresholds = requireNonNull(thresholds);
     this.storage = requireNonNull(storage);
-    this.lockManager = requireNonNull(lockManager);
+    this.snapshotStore = requireNonNull(snapshotStore);
     this.backup = requireNonNull(backup);
     this.recovery = requireNonNull(recovery);
     this.maintenance = requireNonNull(maintenance);
     this.cronJobManager = requireNonNull(cronJobManager);
     this.quotaManager = requireNonNull(quotaManager);
     this.stateManager = requireNonNull(stateManager);
-    this.taskIdGenerator = requireNonNull(taskIdGenerator);
     this.uuidGenerator = requireNonNull(uuidGenerator);
     this.jobUpdateController = requireNonNull(jobUpdateController);
     this.readOnlyScheduler = requireNonNull(readOnlyScheduler);
@@ -259,9 +239,9 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     this.drainHostsCounter = statsProvider.makeCounter(DRAIN_HOSTS);
     this.maintenanceStatusCounter = statsProvider.makeCounter(MAINTENANCE_STATUS);
     this.endMaintenanceCounter = statsProvider.makeCounter(END_MAINTENANCE);
-    this.rewriteConfigsCounter = statsProvider.makeCounter(REWRITE_CONFIGS);
     this.addInstancesCounter = statsProvider.makeCounter(ADD_INSTANCES);
     this.startJobUpdateCounter = statsProvider.makeCounter(START_JOB_UPDATE);
+    this.pruneTasksCounter = statsProvider.makeCounter(PRUNE_TASKS);
   }
 
   @Override
@@ -283,7 +263,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
       IJobConfiguration job = sanitized.getJobConfig();
 
       try {
-        lockManager.assertNotLocked(ILockKey.build(LockKey.job(job.getKey().newBuilder())));
+        jobUpdateController.assertNotUpdating(job.getKey());
 
         checkJobExists(storeProvider, job.getKey());
 
@@ -291,7 +271,6 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
         int count = sanitized.getJobConfig().getInstanceCount();
 
         validateTaskLimits(
-            template,
             count,
             quotaManager.checkInstanceAddition(template, count, storeProvider));
 
@@ -303,8 +282,8 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
         createJobCounter.addAndGet(sanitized.getInstanceIds().size());
 
         return ok();
-      } catch (LockException e) {
-        return error(LOCK_ERROR, e);
+      } catch (JobUpdatingException e) {
+        return error(JOB_UPDATING_ERROR, e);
       } catch (JobExistsException | TaskValidationException e) {
         return error(INVALID_REQUEST, e);
       }
@@ -345,13 +324,11 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
 
     return storage.write(storeProvider -> {
       try {
-        lockManager.assertNotLocked(ILockKey.build(LockKey.job(jobKey.newBuilder())));
+        jobUpdateController.assertNotUpdating(jobKey);
 
-        ITaskConfig template = sanitized.getJobConfig().getTaskConfig();
         int count = sanitized.getJobConfig().getInstanceCount();
 
         validateTaskLimits(
-            template,
             count,
             quotaManager.checkCronUpdate(sanitized.getJobConfig(), storeProvider));
 
@@ -366,8 +343,8 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
         createOrUpdateCronCounter.addAndGet(count);
 
         return ok();
-      } catch (LockException e) {
-        return error(LOCK_ERROR, e);
+      } catch (JobUpdatingException e) {
+        return error(JOB_UPDATING_ERROR, e);
       } catch (JobExistsException | TaskValidationException | CronException e) {
         return error(INVALID_REQUEST, e);
       }
@@ -388,15 +365,15 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
   public Response descheduleCronJob(JobKey mutableJobKey) {
     try {
       IJobKey jobKey = JobKeys.assertValid(IJobKey.build(mutableJobKey));
-      lockManager.assertNotLocked(ILockKey.build(LockKey.job(jobKey.newBuilder())));
+      jobUpdateController.assertNotUpdating(jobKey);
 
       if (cronJobManager.deleteJob(jobKey)) {
         return ok();
       } else {
         return addMessage(empty(), OK, notScheduledCronMessage(jobKey));
       }
-    } catch (LockException e) {
-      return error(LOCK_ERROR, e);
+    } catch (JobUpdatingException e) {
+      return error(JOB_UPDATING_ERROR, e);
     }
   }
 
@@ -470,24 +447,17 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     return readOnlyScheduler.getTierConfigs();
   }
 
-  private void validateLockForTasks(Iterable<IScheduledTask> tasks) throws LockException {
-    ImmutableSet<IJobKey> uniqueKeys = FluentIterable.from(tasks)
-        .transform(Tasks::getJob)
-        .toSet();
-
-    // Validate lock against every unique job key derived from the tasks.
-    for (IJobKey key : uniqueKeys) {
-      lockManager.assertNotLocked(ILockKey.build(LockKey.job(key.newBuilder())));
-    }
-  }
-
   private static Query.Builder implicitKillQuery(Query.Builder query) {
     // Unless statuses were specifically supplied, only attempt to kill active tasks.
     return query.get().getStatuses().isEmpty() ? query.byStatus(ACTIVE_STATES) : query;
   }
 
   @Override
-  public Response killTasks(@Nullable JobKey mutableJob, @Nullable Set<Integer> instances) {
+  public Response killTasks(
+      @Nullable JobKey mutableJob,
+      @Nullable Set<Integer> instances,
+      @Nullable String message) {
+
     Response response = empty();
     IJobKey jobKey = JobKeys.assertValid(IJobKey.build(mutableJob));
     Query.Builder query;
@@ -498,12 +468,13 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     }
 
     return storage.write(storeProvider -> {
-      Iterable<IScheduledTask> tasks = storeProvider.getTaskStore().fetchTasks(query);
       try {
-        validateLockForTasks(tasks);
-      } catch (LockException e) {
-        return error(LOCK_ERROR, e);
+        jobUpdateController.assertNotUpdating(jobKey);
+      } catch (JobUpdatingException e) {
+        return error(JOB_UPDATING_ERROR, e);
       }
+
+      Iterable<IScheduledTask> tasks = storeProvider.getTaskStore().fetchTasks(query);
 
       LOG.info("Killing tasks matching " + query);
 
@@ -512,9 +483,9 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
         if (StateChangeResult.SUCCESS == stateManager.changeState(
             storeProvider,
             taskId,
-            Optional.absent(),
+            Optional.empty(),
             ScheduleStatus.KILLING,
-            auditMessages.killedByRemoteUser())) {
+            auditMessages.killedByRemoteUser(Optional.ofNullable(message)))) {
           ++tasksKilled;
         }
       }
@@ -533,9 +504,9 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
 
     return storage.write(storeProvider -> {
       try {
-        lockManager.assertNotLocked(ILockKey.build(LockKey.job(jobKey.newBuilder())));
-      } catch (LockException e) {
-        return error(LOCK_ERROR, e);
+        jobUpdateController.assertNotUpdating(jobKey);
+      } catch (JobUpdatingException e) {
+        return error(JOB_UPDATING_ERROR, e);
       }
 
       Query.Builder query = Query.instanceScoped(jobKey, shardIds).active();
@@ -549,7 +520,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
         stateManager.changeState(
             storeProvider,
             taskId,
-            Optional.absent(),
+            Optional.empty(),
             ScheduleStatus.RESTARTING,
             auditMessages.restartedByRemoteUser());
       }
@@ -622,7 +593,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     storage.write(storeProvider -> stateManager.changeState(
         storeProvider,
         taskId,
-        Optional.absent(),
+        Optional.empty(),
         status,
         auditMessages.transitionedBy()));
 
@@ -673,38 +644,8 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
 
   @Override
   public Response snapshot() {
-    storage.snapshot();
+    snapshotStore.snapshot();
     return ok();
-  }
-
-  @Override
-  public Response rewriteConfigs(RewriteConfigsRequest request) {
-    if (request.getRewriteCommandsSize() == 0) {
-      return addMessage(empty(), INVALID_REQUEST, "No rewrite commands provided.");
-    }
-
-    return storage.write(storeProvider -> {
-      List<String> errors = Lists.newArrayList();
-
-      for (ConfigRewrite command : request.getRewriteCommands()) {
-        Optional<String> error = rewriteConfig(IConfigRewrite.build(command), storeProvider);
-        if (error.isPresent()) {
-          errors.add(error.get());
-        } else {
-          rewriteConfigsCounter.incrementAndGet();
-        }
-      }
-
-      Response resp = empty();
-      if (errors.isEmpty()) {
-        resp.setResponseCode(OK);
-      } else {
-        for (String error : errors) {
-          addMessage(resp, WARNING, error);
-        }
-      }
-      return resp;
-    });
   }
 
   @Override
@@ -717,7 +658,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
 
       Optional<Integer> batchSize = settings.isSetBatchSize()
           ? Optional.of(settings.getBatchSize())
-          : Optional.absent();
+          : Optional.empty();
 
       taskReconciler.triggerExplicitReconciliation(batchSize);
       return ok();
@@ -732,95 +673,13 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     return ok();
   }
 
-  private Optional<String> rewriteJob(IJobConfigRewrite jobRewrite, CronJobStore.Mutable jobStore) {
-    IJobConfiguration existingJob = jobRewrite.getOldJob();
-    IJobConfiguration rewrittenJob;
-    Optional<String> error = Optional.absent();
-    try {
-      rewrittenJob = configurationManager.validateAndPopulate(jobRewrite.getRewrittenJob());
-    } catch (TaskDescriptionException e) {
-      // We could add an error here, but this is probably a hint of something wrong in
-      // the client that's causing a bad configuration to be applied.
-      throw new RuntimeException(e);
-    }
-
-    if (existingJob.getKey().equals(rewrittenJob.getKey())) {
-      Optional<IJobConfiguration> job = jobStore.fetchJob(existingJob.getKey());
-      if (job.isPresent()) {
-        IJobConfiguration storedJob = job.get();
-        if (storedJob.equals(existingJob)) {
-          jobStore.saveAcceptedJob(rewrittenJob);
-        } else {
-          error = Optional.of(
-              "CAS compare failed for " + JobKeys.canonicalString(storedJob.getKey()));
-        }
-      } else {
-        error = Optional.of(
-            "No jobs found for key " + JobKeys.canonicalString(existingJob.getKey()));
-      }
-    } else {
-      error = Optional.of("Disallowing rewrite attempting to change job key.");
-    }
-
-    return error;
-  }
-
-  private Optional<String> rewriteInstance(
-      IInstanceConfigRewrite instanceRewrite,
-      MutableStoreProvider storeProvider) {
-
-    IInstanceKey instanceKey = instanceRewrite.getInstanceKey();
-    Optional<String> error = Optional.absent();
-    Iterable<IScheduledTask> tasks = storeProvider.getTaskStore().fetchTasks(
-        Query.instanceScoped(instanceKey.getJobKey(),
-            instanceKey.getInstanceId())
-            .active());
-    Optional<IAssignedTask> task =
-        Optional.fromNullable(Iterables.getOnlyElement(tasks, null))
-            .transform(IScheduledTask::getAssignedTask);
-
-    if (task.isPresent()) {
-      if (task.get().getTask().equals(instanceRewrite.getOldTask())) {
-        ITaskConfig newConfiguration = instanceRewrite.getRewrittenTask();
-        boolean changed = storeProvider.getUnsafeTaskStore().unsafeModifyInPlace(
-            task.get().getTaskId(), newConfiguration);
-        if (!changed) {
-          error = Optional.of("Did not change " + task.get().getTaskId());
-        }
-      } else {
-        error = Optional.of("CAS compare failed for " + instanceKey);
-      }
-    } else {
-      error = Optional.of("No active task found for " + instanceKey);
-    }
-
-    return error;
-  }
-
-  private Optional<String> rewriteConfig(
-      IConfigRewrite command,
-      MutableStoreProvider storeProvider) {
-
-    Optional<String> error;
-    switch (command.getSetField()) {
-      case JOB_REWRITE:
-        error = rewriteJob(command.getJobRewrite(), storeProvider.getCronJobStore());
-        break;
-
-      case INSTANCE_REWRITE:
-        error = rewriteInstance(command.getInstanceRewrite(), storeProvider);
-        break;
-
-      default:
-        throw new IllegalArgumentException("Unhandled command type " + command.getSetField());
-    }
-
-    return error;
-  }
-
   @Override
   public Response addInstances(InstanceKey key, int count) {
     IJobKey jobKey = JobKeys.assertValid(IJobKey.build(key.getJobKey()));
+
+    if (count <= 0) {
+      return invalidRequest(INVALID_INSTANCE_COUNT);
+    }
 
     Response response = empty();
     return storage.write(storeProvider -> {
@@ -829,27 +688,22 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
           return invalidRequest("Instances may not be added to cron jobs.");
         }
 
-        lockManager.assertNotLocked(ILockKey.build(LockKey.job(jobKey.newBuilder())));
+        jobUpdateController.assertNotUpdating(jobKey);
 
-        FluentIterable<IScheduledTask> currentTasks = FluentIterable.from(
+        List<IScheduledTask> currentTasks = ImmutableList.copyOf(
             storeProvider.getTaskStore().fetchTasks(Query.jobScoped(jobKey).active()));
 
-        if (count <= 0) {
-          return invalidRequest(INVALID_INSTANCE_COUNT);
-        }
-
-        Optional<IScheduledTask> templateTask = Iterables.tryFind(
-            currentTasks,
-            e -> e.getAssignedTask().getInstanceId() == key.getInstanceId());
+        Optional<IScheduledTask> templateTask = currentTasks.stream()
+            .filter(e -> e.getAssignedTask().getInstanceId() == key.getInstanceId())
+            .findFirst();
         if (!templateTask.isPresent()) {
           return invalidRequest(INVALID_INSTANCE_ID);
         }
 
-        int lastId = currentTasks
-            .transform(e -> e.getAssignedTask().getInstanceId())
-            .toList()
-            .stream()
-            .max(Comparator.naturalOrder()).get();
+        int lastId = currentTasks.stream()
+            .map(e -> e.getAssignedTask().getInstanceId())
+            .max(Comparator.naturalOrder())
+            .get();
 
         Set<Integer> instanceIds = ContiguousSet.create(
             Range.openClosed(lastId, lastId + count),
@@ -857,7 +711,6 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
 
         ITaskConfig task = templateTask.get().getAssignedTask().getTask();
         validateTaskLimits(
-            task,
             Iterables.size(currentTasks) + instanceIds.size(),
             quotaManager.checkInstanceAddition(task, instanceIds.size(), storeProvider));
 
@@ -865,8 +718,8 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
         addInstancesCounter.addAndGet(instanceIds.size());
 
         return response.setResponseCode(OK);
-      } catch (LockException e) {
-        return error(LOCK_ERROR, e);
+      } catch (JobUpdatingException e) {
+        return error(JOB_UPDATING_ERROR, e);
       } catch (TaskValidationException | IllegalArgumentException e) {
         return error(INVALID_REQUEST, e);
       }
@@ -885,7 +738,6 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
   }
 
   private void validateTaskLimits(
-      ITaskConfig task,
       int totalInstances,
       QuotaCheckResult quotaCheck) throws TaskValidationException {
 
@@ -894,16 +746,9 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
           "Instance count must be between 1 and %d inclusive.", thresholds.getMaxTasksPerJob()));
     }
 
-    // TODO(maximk): This is a short-term hack to stop the bleeding from
-    //               https://issues.apache.org/jira/browse/MESOS-691
-    if (taskIdGenerator.generate(task, totalInstances).length() > MAX_TASK_ID_LENGTH) {
-      throw new TaskValidationException(
-          "Task ID is too long, please shorten your role or job name.");
-    }
-
     if (quotaCheck.getResult() == INSUFFICIENT_QUOTA) {
       throw new TaskValidationException("Insufficient resource quota: "
-          + quotaCheck.getDetails().or(""));
+          + quotaCheck.getDetails().orElse(""));
     }
   }
 
@@ -1020,13 +865,12 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
       Response response = empty();
       try {
         validateTaskLimits(
-            request.getTaskConfig(),
             request.getInstanceCount(),
             quotaManager.checkJobUpdate(update, storeProvider));
 
         jobUpdateController.start(
             update,
-            new AuditData(remoteUserName, Optional.fromNullable(message)));
+            new AuditData(remoteUserName, Optional.ofNullable(message)));
         startJobUpdateCounter.addAndGet(request.getInstanceCount());
         return response.setResponseCode(OK)
             .setResult(Result.startJobUpdateResult(
@@ -1073,7 +917,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     return changeJobUpdateState(
         mutableKey,
         JobUpdateController::pause,
-        Optional.fromNullable(message));
+        Optional.ofNullable(message));
   }
 
   @Override
@@ -1081,7 +925,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     return changeJobUpdateState(
         mutableKey,
         JobUpdateController::resume,
-        Optional.fromNullable(message));
+        Optional.ofNullable(message));
   }
 
   @Override
@@ -1089,7 +933,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     return changeJobUpdateState(
         mutableKey,
         JobUpdateController::abort,
-        Optional.fromNullable(message));
+        Optional.ofNullable(message));
   }
 
   @Override
@@ -1097,7 +941,7 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     return changeJobUpdateState(
         mutableKey,
         JobUpdateController::rollback,
-        Optional.fromNullable(message));
+        Optional.ofNullable(message));
   }
 
   @Override
@@ -1109,6 +953,34 @@ class SchedulerThriftInterface implements AnnotatedAuroraAdmin {
     } catch (UpdateStateException e) {
       return error(INVALID_REQUEST, e);
     }
+  }
+
+  @Override
+  public Response pruneTasks(TaskQuery query) throws TException {
+    if (query.isSetStatuses() && query.getStatuses().stream().anyMatch(ACTIVE_STATES::contains)) {
+      return error("Tasks in non-terminal state cannot be pruned.");
+    } else if (!query.isSetStatuses()) {
+      query.setStatuses(TERMINAL_STATES);
+    }
+
+    Iterable<IScheduledTask> tasks = storage.read(storeProvider ->
+        storeProvider.getTaskStore().fetchTasks(Query.arbitrary(query)));
+    // For some reason fetchTasks ignores the offset/limit options of a TaskQuery. So we have to
+    // manually apply the limit here. To be fixed in AURORA-1892.
+    if (query.isSetLimit()) {
+      tasks = Iterables.limit(tasks, query.getLimit());
+    }
+
+    Iterable<String> taskIds = Iterables.transform(
+        tasks,
+        task -> task.getAssignedTask().getTaskId());
+
+    return storage.write(storeProvider -> {
+      Set<String> taskIdsSet = Sets.newHashSet(taskIds);
+      stateManager.deleteTasks(storeProvider, taskIdsSet);
+      pruneTasksCounter.addAndGet(taskIdsSet.size());
+      return ok();
+    });
   }
 
   @ThriftWorkload

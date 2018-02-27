@@ -74,6 +74,12 @@ class HttpLifecycleConfig(Struct):
   # Endpoint to hit to give a task it's final warning before being killed.
   shutdown_endpoint = Default(String, '/abortabortabort')
 
+  # How much time to wait in seconds after calling the graceful shutdown endpoint
+  graceful_shutdown_wait_secs = Default(Integer, 5)
+
+  # How much time to wait in seconds after calling the shutdown endpoint
+  shutdown_wait_secs = Default(Integer, 5)
+
 
 class LifecycleConfig(Struct):
   http = HttpLifecycleConfig
@@ -132,13 +138,30 @@ class DockerImage(Struct):
   name = Required(String)
   tag = Required(String)
 
+Mode = Enum('RO', 'RW')
+
+class Volume(Struct):
+  container_path = Required(String)
+  host_path = Required(String)
+  mode = Required(Mode)
 
 class Mesos(Struct):
   image = Choice([AppcImage, DockerImage])
+  volumes = Default(List(Volume), [])
 
 
 class Container(Struct):
   docker = Docker
+
+
+class PartitionPolicy(Struct):
+  reschedule = Default(Boolean, True)
+  delay_secs = Default(Integer, 0)
+
+
+class Metadata(Struct):
+  key   = Required(String)
+  value = Required(String)
 
 
 class MesosJob(Struct):
@@ -158,6 +181,7 @@ class MesosJob(Struct):
   update_config = Default(UpdateConfig, UpdateConfig())
 
   constraints                = Map(String, String)
+  metadata                   = Default(List(Metadata), [])
   service                    = Default(Boolean, False)
   max_task_failures          = Default(Integer, 1)
   production                 = Default(Boolean, False)
@@ -168,6 +192,8 @@ class MesosJob(Struct):
   task_links                 = Map(String, String)  # Unsupported.  See AURORA-739
 
   enable_hooks = Default(Boolean, False)  # enable client API hooks; from env python-list 'hooks'
+
+  partition_policy = PartitionPolicy
 
   # Specifying a `Container` with a `docker` property for Docker jobs is deprecated, instead just
   # specify the value of the container property to be a `Docker` container directly.

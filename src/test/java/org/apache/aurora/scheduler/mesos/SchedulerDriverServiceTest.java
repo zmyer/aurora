@@ -13,33 +13,34 @@
  */
 package org.apache.aurora.scheduler.mesos;
 
-import com.google.common.base.Optional;
+import java.util.Optional;
 
 import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
-import org.apache.mesos.Protos;
 import org.apache.mesos.Scheduler;
 import org.apache.mesos.SchedulerDriver;
 import org.junit.Before;
 import org.junit.Test;
 
-import static org.apache.mesos.Protos.FrameworkInfo;
 import static org.apache.mesos.Protos.Status.DRIVER_ABORTED;
 import static org.apache.mesos.Protos.Status.DRIVER_RUNNING;
+import static org.apache.mesos.Protos.TaskID;
+import static org.apache.mesos.v1.Protos.FrameworkID;
+import static org.apache.mesos.v1.Protos.FrameworkInfo;
 import static org.easymock.EasyMock.expect;
 
 public class SchedulerDriverServiceTest extends EasyMockTest {
 
   private static final Optional<String> FRAMEWORK_ID = Optional.of("test framework");
-  private static final Optional<String> NEW_FRAMEWORK_ID = Optional.absent();
+  private static final Optional<String> NEW_FRAMEWORK_ID = Optional.empty();
 
-  private static final DriverSettings SETTINGS = new DriverSettings(
-      "fakemaster",
-      Optional.absent(),
-      FrameworkInfo.newBuilder()
+  private static final FrameworkInfo BASE_INFO = FrameworkInfo.newBuilder()
           .setUser("framework user")
           .setName("test framework")
-          .build());
+          .build();
+  private static final DriverSettings SETTINGS = new DriverSettings(
+      "fakemaster",
+      Optional.empty());
 
   private static final String TASK_1 = "1";
   private static final String TASK_2 = "2";
@@ -49,9 +50,10 @@ public class SchedulerDriverServiceTest extends EasyMockTest {
   private DriverFactory driverFactory;
   private Driver driverService;
   private SchedulerDriver schedulerDriver;
+  private FrameworkInfoFactory infoFactory;
 
-  private static Protos.TaskID createTaskId(String taskId) {
-    return Protos.TaskID.newBuilder().setValue(taskId).build();
+  private static TaskID createTaskId(String taskId) {
+    return TaskID.newBuilder().setValue(taskId).build();
   }
 
   @Before
@@ -60,7 +62,13 @@ public class SchedulerDriverServiceTest extends EasyMockTest {
     storage = new StorageTestUtil(this);
     driverFactory = createMock(DriverFactory.class);
     schedulerDriver = createMock(SchedulerDriver.class);
-    driverService = new SchedulerDriverService(scheduler, storage.storage, SETTINGS, driverFactory);
+    infoFactory = createMock(FrameworkInfoFactory.class);
+    driverService = new SchedulerDriverService(
+        scheduler,
+        storage.storage,
+        SETTINGS,
+        driverFactory,
+        infoFactory);
   }
 
   @Test
@@ -133,10 +141,11 @@ public class SchedulerDriverServiceTest extends EasyMockTest {
   private void expectCreateDriver(Optional<String> frameworkId) {
     storage.expectOperations();
     expect(storage.schedulerStore.fetchFrameworkId()).andReturn(frameworkId);
+    expect(infoFactory.getFrameworkInfo()).andReturn(BASE_INFO);
 
-    FrameworkInfo.Builder builder = SETTINGS.getFrameworkInfo().toBuilder();
+    FrameworkInfo.Builder builder = BASE_INFO.toBuilder();
     if (frameworkId.isPresent()) {
-      builder.setId(Protos.FrameworkID.newBuilder().setValue(frameworkId.get()));
+      builder.setId(FrameworkID.newBuilder().setValue(frameworkId.get()));
     }
 
     expect(driverFactory.create(

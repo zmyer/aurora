@@ -26,18 +26,18 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
 
 import org.apache.aurora.gen.ResourceAggregate;
-import org.apache.aurora.scheduler.TierInfo;
+import org.apache.aurora.scheduler.configuration.executor.ExecutorSettings;
+import org.apache.aurora.scheduler.storage.durability.ThriftBackfill;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
 import org.apache.aurora.scheduler.storage.entities.IResource;
 import org.apache.aurora.scheduler.storage.entities.IResourceAggregate;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.aurora.scheduler.storage.log.ThriftBackfill;
-import org.apache.mesos.Protos.Resource;
+import org.apache.mesos.v1.Protos.Resource;
 
 import static org.apache.aurora.scheduler.resources.ResourceType.BY_MESOS_NAME;
 import static org.apache.aurora.scheduler.resources.ResourceType.fromResource;
-import static org.apache.mesos.Protos.Offer;
+import static org.apache.mesos.v1.Protos.Offer;
 
 /**
  * Manages resources and provides Aurora/Mesos translation.
@@ -118,11 +118,12 @@ public final class ResourceManager {
    * Gets offer resources filtered by the provided {@code tierInfo} instance.
    *
    * @param offer Offer to get resources from.
-   * @param tierInfo Tier info.
+   * @param revocable if {@code true} return only revocable resources,
+   *                  if {@code false} return non-revocable.
    * @return Offer resources filtered by {@code tierInfo}.
    */
-  public static Iterable<Resource> getOfferResources(Offer offer, TierInfo tierInfo) {
-    return tierInfo.isRevocable()
+  public static Iterable<Resource> getOfferResources(Offer offer, boolean revocable) {
+    return revocable
         ? getRevocableOfferResources(offer)
         : getNonRevocableOfferResources(offer);
   }
@@ -131,16 +132,17 @@ public final class ResourceManager {
    * Gets offer resoruces filtered by the {@code tierInfo} and {@code type}.
    *
    * @param offer Offer to get resources from.
-   * @param tierInfo Tier info.
+   * @param revocable if {@code true} return only revocable resources,
+   *                  if {@code false} return non-revocable.
    * @param type Resource type.
    * @return Offer resources filtered by {@code tierInfo} and {@code type}.
    */
   public static Iterable<Resource> getOfferResources(
       Offer offer,
-      TierInfo tierInfo,
+      boolean revocable,
       ResourceType type) {
 
-    return Iterables.filter(getOfferResources(offer, tierInfo), r -> fromResource(r).equals(type));
+    return Iterables.filter(getOfferResources(offer, revocable), r -> fromResource(r).equals(type));
   }
 
   /**
@@ -242,6 +244,11 @@ public final class ResourceManager {
    */
   public static ResourceBag bagFromResources(Iterable<IResource> resources) {
     return bagFromResources(resources, RESOURCE_TO_TYPE, QUANTIFY_RESOURCE);
+  }
+
+  public static ResourceBag bagFromTask(ITaskConfig task, ExecutorSettings executorSettings) {
+    return bagFromResources(task.getResources(), RESOURCE_TO_TYPE, QUANTIFY_RESOURCE)
+        .add(executorSettings.getExecutorOverhead(task));
   }
 
   /**

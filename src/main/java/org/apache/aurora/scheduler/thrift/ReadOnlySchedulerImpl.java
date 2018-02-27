@@ -18,7 +18,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
 import javax.inject.Inject;
@@ -27,7 +29,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
 import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.common.collect.FluentIterable;
@@ -249,7 +250,7 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
 
   @Override
   public Response getJobSummary(@Nullable String maybeNullRole) {
-    Optional<String> ownerRole = Optional.fromNullable(maybeNullRole);
+    Optional<String> ownerRole = Optional.ofNullable(maybeNullRole);
 
     Multimap<IJobKey, IScheduledTask> tasks = getTasks(maybeRoleScoped(ownerRole));
     Map<IJobKey, IJobConfiguration> jobs = getJobs(ownerRole, tasks);
@@ -263,7 +264,7 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
       if (job.isSetCronSchedule()) {
         CrontabEntry crontabEntry = CrontabEntry.parse(job.getCronSchedule());
         Optional<Date> nextRun = cronPredictor.predictNextRun(crontabEntry);
-        return nextRun.transform(date -> summary.setNextCronRunMs(date.getTime())).or(summary);
+        return nextRun.map(date -> summary.setNextCronRunMs(date.getTime())).orElse(summary);
       } else {
         return summary;
       }
@@ -277,7 +278,7 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
 
   @Override
   public Response getJobs(@Nullable String maybeNullRole) {
-    Optional<String> ownerRole = Optional.fromNullable(maybeNullRole);
+    Optional<String> ownerRole = Optional.ofNullable(maybeNullRole);
 
     return ok(Result.getJobsResult(
         new GetJobsResult()
@@ -308,11 +309,15 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
   @Override
   public Response getJobUpdateSummaries(JobUpdateQuery mutableQuery) {
     IJobUpdateQuery query = IJobUpdateQuery.build(requireNonNull(mutableQuery));
-    return ok(Result.getJobUpdateSummariesResult(
-        new GetJobUpdateSummariesResult()
-            .setUpdateSummaries(IJobUpdateSummary.toBuildersList(storage.read(
-                storeProvider ->
-                    storeProvider.getJobUpdateStore().fetchJobUpdateSummaries(query))))));
+
+    List<IJobUpdateSummary> summaries = storage.read(
+        storeProvider -> storeProvider.getJobUpdateStore()
+            .fetchJobUpdates(query)
+            .stream()
+            .map(u -> u.getUpdate().getSummary()).collect(Collectors.toList()));
+
+    return ok(Result.getJobUpdateSummariesResult(new GetJobUpdateSummariesResult()
+        .setUpdateSummaries(IJobUpdateSummary.toBuildersList(summaries))));
   }
 
   @Override
@@ -324,8 +329,8 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
     if (mutableQuery != null) {
       IJobUpdateQuery query = IJobUpdateQuery.build(mutableQuery);
 
-      List<IJobUpdateDetails> details = storage.read(storeProvider ->
-          storeProvider.getJobUpdateStore().fetchJobUpdateDetails(query));
+      List<IJobUpdateDetails> details =
+          storage.read(storeProvider -> storeProvider.getJobUpdateStore().fetchJobUpdates(query));
 
       return ok(Result.getJobUpdateDetailsResult(new GetJobUpdateDetailsResult()
           .setDetailsList(IJobUpdateDetails.toBuildersList(details))));
@@ -334,7 +339,7 @@ class ReadOnlySchedulerImpl implements ReadOnlyScheduler.Iface {
     // TODO(zmanji): Remove this code once `mutableKey` is removed in AURORA-1765
     IJobUpdateKey key = IJobUpdateKey.build(mutableKey);
     Optional<IJobUpdateDetails> details = storage.read(storeProvider ->
-        storeProvider.getJobUpdateStore().fetchJobUpdateDetails(key));
+        storeProvider.getJobUpdateStore().fetchJobUpdate(key));
 
     if (details.isPresent()) {
       return addMessage(ok(Result.getJobUpdateDetailsResult(

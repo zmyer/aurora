@@ -26,6 +26,7 @@ import sys
 import traceback
 
 from twitter.common import app, log
+from twitter.common.exceptions import ExceptionalThread
 from twitter.common.log.options import LogOptions
 
 from apache.aurora.config.schema.base import LoggerDestination, LoggerMode
@@ -40,6 +41,7 @@ from apache.aurora.executor.thermos_task_runner import (
     DefaultThermosTaskRunnerProvider,
     UserOverrideThermosTaskRunnerProvider
 )
+from apache.thermos.common.excepthook import ExceptionTerminationHandler
 
 try:
   from mesos.executor import MesosExecutorDriver
@@ -188,6 +190,15 @@ app.add_option(
      action='store_true',
      help="Preserve thermos runners' environment variables for the task being run.")
 
+app.add_option(
+    '--stop_timeout_in_secs',
+    dest='stop_timeout_in_secs',
+    type=int,
+    default=120,
+    help='The maximum amount of time to wait (in seconds) when gracefully killing a task before '
+         'beginning forceful termination. Graceful and forceful termination is defined in '
+         'HttpLifecycleConfig (see Task Lifecycle documentation for more info on termination).')
+
 
 # TODO(wickman) Consider just having the OSS version require pip installed
 # thermos_runner binaries on every machine and instead of embedding the pex
@@ -254,7 +265,8 @@ def initialize(options):
       status_providers=status_providers,
       sandbox_provider=UserOverrideDirectorySandboxProvider(options.execute_as_user),
       no_sandbox_create_user=options.no_create_user,
-      sandbox_mount_point=options.sandbox_mount_point
+      sandbox_mount_point=options.sandbox_mount_point,
+      stop_timeout_in_secs=options.stop_timeout_in_secs
     )
   else:
     thermos_runner_provider = DefaultThermosTaskRunnerProvider(
@@ -273,10 +285,26 @@ def initialize(options):
       runner_provider=thermos_runner_provider,
       status_providers=status_providers,
       no_sandbox_create_user=options.no_create_user,
-      sandbox_mount_point=options.sandbox_mount_point
+      sandbox_mount_point=options.sandbox_mount_point,
+      stop_timeout_in_secs=options.stop_timeout_in_secs
     )
 
   return thermos_executor
+
+
+class ExecutorDriverThread(ExceptionalThread):
+  """ Start the executor and wait until it is stopped.
+
+  This is decoupled from the main thread, because only the main thread can receive signals
+  and we would miss those when blocking in the driver run method.
+  """
+
+  def __init__(self, driver):
+    self._driver = driver
+    super(ExecutorDriverThread, self).__init__()
+
+  def run(self):
+    self._driver.run()
 
 
 def proxy_main():
@@ -293,9 +321,17 @@ def proxy_main():
     # time period
     ExecutorTimeout(thermos_executor.launched, driver).start()
 
-    # Start executor
-    driver.run()
+    # Start executor and wait until it is stopped.
+    driver_thread = ExecutorDriverThread(driver)
+    driver_thread.start()
+    try:
+      while driver_thread.isAlive():
+        driver_thread.join(5)
+    except (KeyboardInterrupt, SystemExit):
+      driver.stop()
+      raise
 
     log.info('MesosExecutorDriver.run() has finished.')
 
+  app.register_module(ExceptionTerminationHandler())
   app.main()

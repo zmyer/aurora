@@ -18,26 +18,28 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Optional;
 import java.util.Properties;
 
+import javax.inject.Singleton;
+
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.Parameters;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.inject.AbstractModule;
 
-import org.apache.aurora.common.args.Arg;
-import org.apache.aurora.common.args.CmdLine;
-import org.apache.aurora.common.args.constraints.NotNull;
 import org.apache.aurora.common.quantity.Amount;
 import org.apache.aurora.common.quantity.Time;
-import org.apache.mesos.Protos;
+import org.apache.aurora.scheduler.config.types.TimeAmount;
+import org.apache.mesos.v1.Protos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.mesos.Protos.FrameworkInfo;
-import static org.apache.mesos.Protos.FrameworkInfo.Capability;
-import static org.apache.mesos.Protos.FrameworkInfo.Capability.Type.GPU_RESOURCES;
-import static org.apache.mesos.Protos.FrameworkInfo.Capability.Type.REVOCABLE_RESOURCES;
+import static org.apache.mesos.v1.Protos.FrameworkInfo;
+import static org.apache.mesos.v1.Protos.FrameworkInfo.Capability;
+import static org.apache.mesos.v1.Protos.FrameworkInfo.Capability.Type.GPU_RESOURCES;
+import static org.apache.mesos.v1.Protos.FrameworkInfo.Capability.Type.REVOCABLE_RESOURCES;
 
 /**
  * Creates and binds {@link DriverSettings} based on values found on the command line.
@@ -47,92 +49,111 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
   private static final Logger LOG =
       LoggerFactory.getLogger(CommandLineDriverSettingsModule.class);
 
-  @NotNull
-  @CmdLine(name = "mesos_master_address",
-      help = "Address for the mesos master, can be a socket address or zookeeper path.")
-  private static final Arg<String> MESOS_MASTER_ADDRESS = Arg.create();
+  @Parameters(separators = "=")
+  public static class Options {
+    @Parameter(names = "-mesos_master_address",
+        required = true,
+        description = "Address for the mesos master, can be a socket address or zookeeper path.")
+    public String mesosMasterAddress;
 
-  @VisibleForTesting
-  static final String PRINCIPAL_KEY = "aurora_authentication_principal";
-  @VisibleForTesting
-  static final String SECRET_KEY = "aurora_authentication_secret";
+    public static final String PRINCIPAL_KEY = "aurora_authentication_principal";
+    public static final String SECRET_KEY = "aurora_authentication_secret";
 
-  @CmdLine(name = "framework_authentication_file",
-      help = "Properties file which contains framework credentials to authenticate with Mesos"
-          + "master. Must contain the properties '" + PRINCIPAL_KEY + "' and "
-          + "'" + SECRET_KEY + "'.")
-  private static final Arg<File> FRAMEWORK_AUTHENTICATION_FILE = Arg.create();
+    @Parameter(names = "-framework_authentication_file",
+        description =
+            "Properties file which contains framework credentials to authenticate with Mesos"
+                + "master. Must contain the properties '" + PRINCIPAL_KEY + "' and "
+                + "'" + SECRET_KEY + "'.")
+    public File frameworkAuthenticationFile;
 
-  @CmdLine(name = "framework_failover_timeout",
-      help = "Time after which a framework is considered deleted.  SHOULD BE VERY HIGH.")
-  private static final Arg<Amount<Long, Time>> FRAMEWORK_FAILOVER_TIMEOUT =
-      Arg.create(Amount.of(21L, Time.DAYS));
+    @Parameter(names = "-framework_failover_timeout",
+        description = "Time after which a framework is considered deleted.  SHOULD BE VERY HIGH.")
+    public TimeAmount frameworkFailoverTimeout = new TimeAmount(21, Time.DAYS);
 
-  @CmdLine(name = "framework_announce_principal",
-      help = "When 'framework_authentication_file' flag is set, the FrameworkInfo "
-          + "registered with the mesos master will also contain the principal. This is "
-          + "necessary if you intend to use mesos authorization via mesos ACLs. "
-          + "The default will change in a future release. Changing this value is backwards "
-          + "incompatible. For details, see MESOS-703.")
-  private static final Arg<Boolean> FRAMEWORK_ANNOUNCE_PRINCIPAL = Arg.create(false);
+    @Parameter(names = "-framework_announce_principal",
+        description = "When 'framework_authentication_file' flag is set, the FrameworkInfo "
+            + "registered with the mesos master will also contain the principal. This is "
+            + "necessary if you intend to use mesos authorization via mesos ACLs. "
+            + "The default will change in a future release. Changing this value is backwards "
+            + "incompatible. For details, see MESOS-703.",
+        arity = 1)
+    public boolean frameworkAnnouncePrincipal = false;
 
-  @CmdLine(name = "framework_name",
-      help = "Name used to register the Aurora framework with Mesos.")
-  private static final Arg<String> FRAMEWORK_NAME = Arg.create("Aurora");
+    @Parameter(names = "-framework_name",
+        description = "Name used to register the Aurora framework with Mesos.")
+    public String frameworkName = "Aurora";
 
-  @CmdLine(name = "executor_user",
-      help = "User to start the executor. Defaults to \"root\". "
-          + "Set this to an unprivileged user if the mesos master was started with "
-          + "\"--no-root_submissions\". If set to anything other than \"root\", the executor "
-          + "will ignore the \"role\" setting for jobs since it can't use setuid() anymore. "
-          + "This means that all your jobs will run under the specified user and the user has "
-          + "to exist on the Mesos agents.")
-  private static final Arg<String> EXECUTOR_USER = Arg.create("root");
+    @Parameter(names = "-executor_user",
+        description = "User to start the executor. Defaults to \"root\". "
+            + "Set this to an unprivileged user if the mesos master was started with "
+            + "\"--no-root_submissions\". If set to anything other than \"root\", the executor "
+            + "will ignore the \"role\" setting for jobs since it can't use setuid() anymore. "
+            + "This means that all your jobs will run under the specified user and the user has "
+            + "to exist on the Mesos agents.")
+    public String executorUser = "root";
 
-  @CmdLine(name = "receive_revocable_resources",
-      help = "Allows receiving revocable resource offers from Mesos.")
-  private static final Arg<Boolean> RECEIVE_REVOCABLE_RESOURCES = Arg.create(false);
+    @Parameter(names = "-receive_revocable_resources",
+        description = "Allows receiving revocable resource offers from Mesos.",
+        arity = 1)
+    public boolean receiveRevocableResources = false;
 
-  @CmdLine(name = "mesos_role",
-      help = "The Mesos role this framework will register as. The default is to left this empty, "
-          + "and the framework will register without any role and only receive unreserved "
-          + "resources in offer.")
-  private static final Arg<String> MESOS_ROLE = Arg.create();
+    @Parameter(names = "-partition_aware",
+        description = "Enable paritition-aware status updates.",
+        arity = 1)
+    public boolean isPartitionAware = false;
 
+    @Parameter(names = "-mesos_role",
+        description =
+            "The Mesos role this framework will register as. The default is to left this empty, "
+                + "and the framework will register without any role and only receive unreserved "
+                + "resources in offer.")
+    public String mesosRole;
+  }
+
+  private final Options options;
   private final boolean allowGpuResource;
 
-  public CommandLineDriverSettingsModule(boolean allowGpuResource) {
+  public CommandLineDriverSettingsModule(Options options, boolean allowGpuResource) {
+    this.options = options;
     this.allowGpuResource = allowGpuResource;
   }
 
   @Override
   protected void configure() {
-    Optional<Protos.Credential> credentials = getCredentials();
-    Optional<String> principal = Optional.absent();
-    if (FRAMEWORK_ANNOUNCE_PRINCIPAL.get() && credentials.isPresent()) {
+    Optional<Protos.Credential> credentials = getCredentials(options);
+    Optional<String> principal = Optional.empty();
+    if (options.frameworkAnnouncePrincipal && credentials.isPresent()) {
       principal = Optional.of(credentials.get().getPrincipal());
     }
-    Optional<String> role =
-        MESOS_ROLE.hasAppliedValue() ? Optional.of(MESOS_ROLE.get()) : Optional.absent();
-    DriverSettings settings = new DriverSettings(
-        MESOS_MASTER_ADDRESS.get(),
-        credentials,
-        buildFrameworkInfo(
-            FRAMEWORK_NAME.get(),
-            EXECUTOR_USER.get(),
-            principal,
-            FRAMEWORK_FAILOVER_TIMEOUT.get(),
-            RECEIVE_REVOCABLE_RESOURCES.get(),
-            allowGpuResource,
-            role));
+    Optional<String> role = Optional.ofNullable(options.mesosRole);
+    DriverSettings settings = new DriverSettings(options.mesosMasterAddress, credentials);
     bind(DriverSettings.class).toInstance(settings);
+
+    FrameworkInfo base =
+        buildFrameworkInfo(
+            options.frameworkName,
+            options.executorUser,
+            principal,
+            options.frameworkFailoverTimeout,
+            options.receiveRevocableResources,
+            allowGpuResource,
+            options.isPartitionAware,
+            role);
+    bind(FrameworkInfo.class)
+        .annotatedWith(FrameworkInfoFactory.FrameworkInfoFactoryImpl.BaseFrameworkInfo.class)
+        .toInstance(base);
+    bind(FrameworkInfoFactory.class).to(FrameworkInfoFactory.FrameworkInfoFactoryImpl.class);
+    bind(FrameworkInfoFactory.FrameworkInfoFactoryImpl.class).in(Singleton.class);
+
   }
 
-  private static Optional<Protos.Credential> getCredentials() {
-    if (FRAMEWORK_AUTHENTICATION_FILE.hasAppliedValue()) {
+  private static Optional<Protos.Credential> getCredentials(Options opts) {
+    if (opts.frameworkAuthenticationFile == null) {
+      return Optional.empty();
+    } else {
       Properties properties;
       try {
-        properties = parseCredentials(new FileInputStream(FRAMEWORK_AUTHENTICATION_FILE.get()));
+        properties = parseCredentials(new FileInputStream(opts.frameworkAuthenticationFile));
       } catch (FileNotFoundException e) {
         LOG.error("Authentication File not Found");
         throw new RuntimeException(e);
@@ -140,14 +161,12 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
 
       LOG.info(
           "Connecting to master using authentication (principal: {}).",
-          properties.get(PRINCIPAL_KEY));
+          properties.get(Options.PRINCIPAL_KEY));
 
       return Optional.of(Protos.Credential.newBuilder()
-          .setPrincipal(properties.getProperty(PRINCIPAL_KEY))
-          .setSecret(properties.getProperty(SECRET_KEY))
+          .setPrincipal(properties.getProperty(Options.PRINCIPAL_KEY))
+          .setSecret(properties.getProperty(Options.SECRET_KEY))
           .build());
-    } else {
-      return Optional.absent();
     }
   }
 
@@ -163,6 +182,7 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
       Amount<Long, Time> failoverTimeout,
       boolean revocable,
       boolean allowGpu,
+      boolean enablePartitionAwareness,
       Optional<String> role) {
 
     FrameworkInfo.Builder infoBuilder = FrameworkInfo.newBuilder()
@@ -183,6 +203,11 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
       infoBuilder.addCapabilities(Capability.newBuilder().setType(GPU_RESOURCES));
     }
 
+    if (enablePartitionAwareness) {
+      infoBuilder.addCapabilities(
+          Capability.newBuilder().setType(Capability.Type.PARTITION_AWARE).build());
+    }
+
     if (role.isPresent()) {
       infoBuilder.setRole(role.get());
     }
@@ -199,10 +224,10 @@ public class CommandLineDriverSettingsModule extends AbstractModule {
       LOG.error("Unable to load authentication file");
       throw new RuntimeException(e);
     }
-    Preconditions.checkState(properties.containsKey(PRINCIPAL_KEY),
-        "The framework authentication file is missing the key: %s", PRINCIPAL_KEY);
-    Preconditions.checkState(properties.containsKey(SECRET_KEY),
-        "The framework authentication file is missing the key: %s", SECRET_KEY);
+    Preconditions.checkState(properties.containsKey(Options.PRINCIPAL_KEY),
+        "The framework authentication file is missing the key: %s", Options.PRINCIPAL_KEY);
+    Preconditions.checkState(properties.containsKey(Options.SECRET_KEY),
+        "The framework authentication file is missing the key: %s", Options.SECRET_KEY);
     return properties;
   }
 }

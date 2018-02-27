@@ -16,11 +16,11 @@ package org.apache.aurora.scheduler.state;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -51,12 +51,12 @@ import org.apache.aurora.scheduler.scheduling.RescheduleCalculator;
 import org.apache.aurora.scheduler.storage.AttributeStore;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
-import org.apache.mesos.Protos.SlaveID;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
+import org.apache.mesos.v1.Protos.AgentID;
 import org.easymock.Capture;
 import org.easymock.EasyMock;
 import org.easymock.IArgumentMatcher;
@@ -70,8 +70,11 @@ import static org.apache.aurora.gen.ScheduleStatus.INIT;
 import static org.apache.aurora.gen.ScheduleStatus.KILLED;
 import static org.apache.aurora.gen.ScheduleStatus.KILLING;
 import static org.apache.aurora.gen.ScheduleStatus.LOST;
+import static org.apache.aurora.gen.ScheduleStatus.PARTITIONED;
 import static org.apache.aurora.gen.ScheduleStatus.PENDING;
+import static org.apache.aurora.gen.ScheduleStatus.RESTARTING;
 import static org.apache.aurora.gen.ScheduleStatus.RUNNING;
+import static org.apache.aurora.gen.ScheduleStatus.STARTING;
 import static org.apache.aurora.gen.ScheduleStatus.THROTTLED;
 import static org.apache.aurora.scheduler.resources.ResourceTestUtil.resetPorts;
 import static org.apache.aurora.scheduler.resources.ResourceType.PORTS;
@@ -111,7 +114,7 @@ public class StateManagerImplTest extends EasyMockTest {
     eventSink = createMock(EventSink.class);
     rescheduleCalculator = createMock(RescheduleCalculator.class);
     // TODO(William Farner): Use a mocked storage.
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     stateManager = new StateManagerImpl(
         clock,
         driver,
@@ -207,8 +210,8 @@ public class StateManagerImplTest extends EasyMockTest {
             .setTaskId(taskId)
             .setTask(NON_SERVICE_CONFIG.newBuilder()));
     assertEquals(
-        ImmutableSet.of(IScheduledTask.build(expected)),
-        Storage.Util.fetchTask(storage, taskId).asSet());
+        Optional.of(IScheduledTask.build(expected)),
+        Storage.Util.fetchTask(storage, taskId));
   }
 
   @Test
@@ -354,6 +357,84 @@ public class StateManagerImplTest extends EasyMockTest {
     assertEquals(1, rescheduledTask.getFailureCount());
   }
 
+  @Test
+  public void testIncrementPartitionCount() {
+    String taskId = "a";
+    expect(taskIdGenerator.generate(SERVICE_CONFIG, 0)).andReturn(taskId);
+    expectStateTransitions(taskId, INIT, PENDING, ASSIGNED, RUNNING, PARTITIONED);
+    control.replay();
+
+    insertTask(SERVICE_CONFIG, 0);
+
+    assignTask(taskId, HOST_A);
+    changeState(taskId, RUNNING);
+    changeState(taskId, PARTITIONED);
+    IScheduledTask updatedTask = Storage.Util.fetchTask(storage, taskId).get();
+    assertEquals(1, updatedTask.getTimesPartitioned());
+  }
+
+  @Test
+  public void testTransitionToLost() {
+    String taskId = "a";
+    expect(taskIdGenerator.generate(SERVICE_CONFIG, 0)).andReturn(taskId);
+    expectStateTransitions(taskId, INIT, PENDING, ASSIGNED, RESTARTING, PARTITIONED, LOST);
+    driver.killTask(EasyMock.anyObject());
+    driver.killTask(EasyMock.anyObject());
+    String taskId2 = "a2";
+    expect(taskIdGenerator.generate(SERVICE_CONFIG, 0)).andReturn(taskId2);
+    noFlappingPenalty();
+    expectStateTransitions(taskId2, INIT, PENDING);
+
+    control.replay();
+
+    insertTask(SERVICE_CONFIG, 0);
+
+    assignTask(taskId, HOST_A);
+    changeState(taskId, ASSIGNED);
+    changeState(taskId, RESTARTING);
+    changeState(taskId, PARTITIONED);
+    IScheduledTask updatedTask = Storage.Util.fetchTask(storage, taskId).get();
+    assertEquals(LOST, updatedTask.getStatus());
+  }
+
+  @Test
+  public void testCompactPartitionCycles() {
+    String taskId = "a";
+    expect(taskIdGenerator.generate(SERVICE_CONFIG, 0)).andReturn(taskId);
+    expectStateTransitions(
+        taskId,
+        INIT,
+        PENDING,
+        ASSIGNED,
+        STARTING,
+        PARTITIONED,
+        RUNNING,
+        PARTITIONED,
+        RUNNING,
+        PARTITIONED,
+        RUNNING,
+        PARTITIONED);
+
+    control.replay();
+
+    insertTask(SERVICE_CONFIG, 0);
+    assignTask(taskId, HOST_A);
+    changeState(taskId, STARTING);
+    changeState(taskId, PARTITIONED);
+    changeState(taskId, RUNNING);
+    changeState(taskId, PARTITIONED);
+    changeState(taskId, RUNNING);
+    changeState(taskId, PARTITIONED);
+    changeState(taskId, RUNNING);
+    changeState(taskId, PARTITIONED);
+    IScheduledTask updatedTask = Storage.Util.fetchTask(storage, taskId).get();
+    assertEquals(
+        ImmutableList.of(PENDING, ASSIGNED, STARTING, PARTITIONED, RUNNING, PARTITIONED),
+        updatedTask.getTaskEvents().stream()
+            .map(e -> e.getStatus())
+            .collect(Collectors.toList()));
+  }
+
   private static ITaskConfig setMaxFailures(ITaskConfig config, int maxFailures) {
     return ITaskConfig.build(config.newBuilder().setMaxTaskFailures(maxFailures));
   }
@@ -373,12 +454,12 @@ public class StateManagerImplTest extends EasyMockTest {
         taskId,
         Optional.of(PENDING),
         RUNNING,
-        Optional.absent()));
+        Optional.empty()));
     assertEquals(SUCCESS, changeState(
         taskId,
         Optional.of(ASSIGNED),
         FAILED,
-        Optional.absent()));
+        Optional.empty()));
   }
 
   @Test
@@ -389,7 +470,7 @@ public class StateManagerImplTest extends EasyMockTest {
         "a",
         Optional.of(PENDING),
         ASSIGNED,
-        Optional.absent()));
+        Optional.empty()));
   }
 
   @Test
@@ -550,9 +631,9 @@ public class StateManagerImplTest extends EasyMockTest {
   private StateChangeResult changeState(String taskId, ScheduleStatus status) {
     return changeState(
         taskId,
-        Optional.absent(),
+        Optional.empty(),
         status,
-        Optional.absent());
+        Optional.empty());
   }
 
   private void assignTask(String taskId, IHostAttributes host) {
@@ -564,7 +645,7 @@ public class StateManagerImplTest extends EasyMockTest {
         storeProvider,
         taskId,
         host.getHost(),
-        SlaveID.newBuilder().setValue(host.getSlaveId()).build(),
+        AgentID.newBuilder().setValue(host.getSlaveId()).build(),
         e -> IAssignedTask.build(e.newBuilder().setAssignedPorts(ports))));
   }
 }

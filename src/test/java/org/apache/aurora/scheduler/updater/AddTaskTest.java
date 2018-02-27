@@ -19,6 +19,7 @@ import org.apache.aurora.common.testing.easymock.EasyMockTest;
 import org.apache.aurora.gen.InstanceKey;
 import org.apache.aurora.gen.InstanceTaskConfig;
 import org.apache.aurora.gen.JobUpdateInstructions;
+import org.apache.aurora.gen.JobUpdateKey;
 import org.apache.aurora.gen.JobUpdateSettings;
 import org.apache.aurora.gen.JobUpdateStatus;
 import org.apache.aurora.gen.Range;
@@ -28,7 +29,9 @@ import org.apache.aurora.scheduler.base.Query;
 import org.apache.aurora.scheduler.base.TaskTestUtil;
 import org.apache.aurora.scheduler.state.StateManager;
 import org.apache.aurora.scheduler.storage.entities.IInstanceKey;
+import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IJobUpdateInstructions;
+import org.apache.aurora.scheduler.storage.entities.IJobUpdateKey;
 import org.apache.aurora.scheduler.storage.testing.StorageTestUtil;
 import org.junit.Before;
 import org.junit.Test;
@@ -42,18 +45,23 @@ public class AddTaskTest extends EasyMockTest {
           .setSettings(
               new JobUpdateSettings()
                   .setMinWaitInInstanceRunningMs(1000)));
+  private static final IJobKey JOB = JobKeys.from("role", "env", "job");
   private static final IInstanceKey INSTANCE =
-      IInstanceKey.build(new InstanceKey(JobKeys.from("role", "env", "job").newBuilder(), 0));
+      IInstanceKey.build(new InstanceKey(JOB.newBuilder(), 0));
+  private static final IJobUpdateKey UPDATE_ID =
+          IJobUpdateKey.build(new JobUpdateKey(JOB.newBuilder(), "update_id"));
 
   private StorageTestUtil storageUtil;
   private StateManager stateManager;
   private InstanceActionHandler handler;
+  private UpdateAgentReserver updateAgentReserver;
 
   @Before
   public void setUp() {
     storageUtil = new StorageTestUtil(this);
     storageUtil.expectOperations();
     stateManager = createMock(StateManager.class);
+    updateAgentReserver = createMock(UpdateAgentReserver.class);
     handler = new InstanceActionHandler.AddTask();
   }
 
@@ -73,7 +81,9 @@ public class AddTaskTest extends EasyMockTest {
         INSTRUCTIONS,
         storageUtil.mutableStoreProvider,
         stateManager,
-        JobUpdateStatus.ROLLING_FORWARD);
+        updateAgentReserver,
+        JobUpdateStatus.ROLLING_FORWARD,
+        UPDATE_ID);
   }
 
   @Test
@@ -89,7 +99,9 @@ public class AddTaskTest extends EasyMockTest {
         INSTRUCTIONS,
         storageUtil.mutableStoreProvider,
         stateManager,
-        JobUpdateStatus.ROLLING_FORWARD);
+        updateAgentReserver,
+        JobUpdateStatus.ROLLING_FORWARD,
+        UPDATE_ID);
   }
 
   @Test(expected = IllegalStateException.class)
@@ -103,6 +115,8 @@ public class AddTaskTest extends EasyMockTest {
         INSTRUCTIONS,
         storageUtil.mutableStoreProvider,
         stateManager,
-        JobUpdateStatus.ROLLING_BACK);
+        updateAgentReserver,
+        JobUpdateStatus.ROLLING_BACK,
+        UPDATE_ID);
   }
 }

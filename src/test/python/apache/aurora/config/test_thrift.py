@@ -18,6 +18,7 @@ import re
 import pytest
 
 from apache.aurora.config import AuroraConfig
+from apache.aurora.config.schema.base import PartitionPolicy as PystachioPartitionPolicy
 from apache.aurora.config.schema.base import (
     AppcImage,
     Container,
@@ -26,15 +27,25 @@ from apache.aurora.config.schema.base import (
     HealthCheckConfig,
     Job,
     Mesos,
+    Metadata,
+    Mode,
     Parameter,
-    SimpleTask
+    SimpleTask,
+    Volume
 )
 from apache.aurora.config.thrift import convert as convert_pystachio_to_thrift
 from apache.aurora.config.thrift import InvalidConfig, task_instance_from_job
 from apache.thermos.config.schema import Process, Resources, Task
 
 from gen.apache.aurora.api.constants import GOOD_IDENTIFIER_PATTERN_PYTHON
-from gen.apache.aurora.api.ttypes import CronCollisionPolicy, Identity, JobKey, Resource
+from gen.apache.aurora.api.ttypes import Mode as ThriftMode
+from gen.apache.aurora.api.ttypes import (
+    CronCollisionPolicy,
+    Identity,
+    JobKey,
+    PartitionPolicy,
+    Resource
+)
 from gen.apache.aurora.test.constants import INVALID_IDENTIFIERS, VALID_IDENTIFIERS
 
 HELLO_WORLD = Job(
@@ -63,10 +74,6 @@ def test_simple_config():
   assert job.cronSchedule is None
   assert tti.job == expected_key
   assert tti.isService is False
-  assert tti.numCpus == 0.1
-  assert tti.ramMb == 64
-  assert tti.diskMb == 64
-  assert tti.requestedPorts == frozenset(['health'])
   assert tti.production is False
   assert tti.priority == 0
   assert tti.maxTaskFailures == 1
@@ -108,6 +115,26 @@ def test_config_with_appc_image():
   assert job.taskConfig.container.mesos.image.appc.imageId == image_id
 
 
+def test_config_with_volumes():
+  image_name = 'some-image'
+  image_tag = 'some-tag'
+  host_path = '/etc/secrets/role/'
+  container_path = '/etc/secrets/'
+
+  volume = Volume(host_path=host_path, container_path=container_path, mode=Mode('RO'))
+
+  container = Mesos(image=DockerImage(name=image_name, tag=image_tag), volumes=[volume])
+
+  job = convert_pystachio_to_thrift(HELLO_WORLD(container=container))
+
+  assert len(job.taskConfig.container.mesos.volumes) == 1
+  thrift_volume = job.taskConfig.container.mesos.volumes[0]
+
+  assert thrift_volume.hostPath == host_path
+  assert thrift_volume.containerPath == container_path
+  assert thrift_volume.mode == ThriftMode.RO
+
+
 def test_docker_with_parameters():
   helloworld = HELLO_WORLD(
     container=Container(
@@ -124,6 +151,7 @@ def test_config_with_options():
     priority=200,
     service=True,
     cron_collision_policy='RUN_OVERLAP',
+    partition_policy=PystachioPartitionPolicy(delay_secs=10),
     constraints={
       'dedicated': 'root',
       'cpu': 'x86_64'
@@ -140,6 +168,24 @@ def test_config_with_options():
   assert job.cronCollisionPolicy == CronCollisionPolicy.RUN_OVERLAP
   assert len(tti.constraints) == 2
   assert job.key.environment == 'prod'
+  assert tti.partitionPolicy == PartitionPolicy(True, 10)
+
+
+def test_disable_partition_policy():
+  hwc = HELLO_WORLD(
+    production=True,
+    priority=200,
+    service=True,
+    cron_collision_policy='RUN_OVERLAP',
+    partition_policy=PystachioPartitionPolicy(reschedule=False),
+    constraints={
+      'dedicated': 'root',
+      'cpu': 'x86_64'
+    },
+    environment='prod'
+  )
+  job = convert_pystachio_to_thrift(hwc)
+  assert job.taskConfig.partitionPolicy == PartitionPolicy(False, 0)
 
 
 def test_config_with_ports():
@@ -153,7 +199,8 @@ def test_config_with_ports():
   )
   config = AuroraConfig(hwc)
   job = config.job()
-  assert job.taskConfig.requestedPorts == set(['http', 'admin'])
+  assert Resource(namedPort='http') in list(job.taskConfig.resources)
+  assert Resource(namedPort='admin') in list(job.taskConfig.resources)
 
 
 def test_config_with_bad_resources():
@@ -221,6 +268,46 @@ def test_metadata_in_config():
   pi = iter(tti.metadata).next()
   assert pi.key == 'alpha'
   assert pi.value == '1'
+
+
+def test_config_with_metadata():
+  expected_metadata_tuples = frozenset([("city", "LA"), ("city", "SF")])
+  job = convert_pystachio_to_thrift(
+      HELLO_WORLD(metadata=[
+        Metadata(key=key, value=value)
+        for key, value in expected_metadata_tuples]))
+  tti = job.taskConfig
+
+  metadata_tuples = frozenset((key_value.key, key_value.value)
+                              for key_value in tti.metadata)
+  assert metadata_tuples == expected_metadata_tuples
+
+
+def test_config_with_key_collision_metadata():
+  input_metadata_tuples = frozenset([("city", "LA")])
+  job = convert_pystachio_to_thrift(
+      HELLO_WORLD(metadata=[
+        Metadata(key=key, value=value)
+        for key, value in input_metadata_tuples]), metadata=[('city', "SF")])
+  tti = job.taskConfig
+
+  metadata_tuples = frozenset((key_value.key, key_value.value)
+                              for key_value in tti.metadata)
+  expected_metadata_tuples = frozenset([("city", "LA"), ("city", "SF")])
+  assert metadata_tuples == expected_metadata_tuples
+
+
+def test_config_with_duplicate_metadata():
+  expected_metadata_tuples = frozenset([("city", "LA")])
+  job = convert_pystachio_to_thrift(
+      HELLO_WORLD(metadata=[
+        Metadata(key=key, value=value)
+        for key, value in expected_metadata_tuples]), metadata=[('city', "LA")])
+  tti = job.taskConfig
+
+  metadata_tuples = frozenset((key_value.key, key_value.value)
+                              for key_value in tti.metadata)
+  assert metadata_tuples == expected_metadata_tuples
 
 
 def test_task_instance_from_job():

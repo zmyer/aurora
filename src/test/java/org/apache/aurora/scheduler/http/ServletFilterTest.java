@@ -16,11 +16,11 @@ package org.apache.aurora.scheduler.http;
 import java.io.IOException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 
-import com.google.common.base.Optional;
 import com.google.common.io.Resources;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.ClientResponse.Status;
@@ -46,7 +46,9 @@ public class ServletFilterTest extends AbstractJettyTest {
   }
 
   private void assertContentEncoding(ClientResponse response, Optional<String> encoding) {
-    assertEquals(encoding.orNull(), response.getHeaders().getFirst(HttpHeaders.CONTENT_ENCODING));
+    assertEquals(
+        encoding.orElse(null),
+        response.getHeaders().getFirst(HttpHeaders.CONTENT_ENCODING));
   }
 
   private void assertGzipEncodedGet(String path) {
@@ -68,9 +70,6 @@ public class ServletFilterTest extends AbstractJettyTest {
 
     assertGzipEncodedGet("/updates");
     assertGzipEncodedGet("/updates/");
-
-    assertGzipEncodedGet("/assets/bower_components/angular/angular.js");
-
   }
 
   private void assertResponseStatus(
@@ -105,7 +104,7 @@ public class ServletFilterTest extends AbstractJettyTest {
   public void testLeaderRedirect() throws Exception {
     replayAndStart();
 
-    assertResponseStatus("/", Status.OK, Optional.absent());
+    assertResponseStatus("/", Status.OK, Optional.empty());
 
     // If there's no leader, we should send service unavailable and an error page.
     unsetLeadingSchduler();
@@ -117,12 +116,12 @@ public class ServletFilterTest extends AbstractJettyTest {
                 LeaderRedirectFilter.NO_LEADER_PAGE)));
 
     // This process is leading
-    setLeadingScheduler(httpServer.getHostText(), httpServer.getPort());
-    leaderRedirectSmokeTest(Status.OK, Optional.absent());
+    setLeadingScheduler(httpServer.getHost(), httpServer.getPort());
+    leaderRedirectSmokeTest(Status.OK, Optional.empty());
 
     setLeadingScheduler("otherHost", 1234);
-    leaderRedirectSmokeTest(Status.TEMPORARY_REDIRECT, Optional.absent());
-    assertResponseStatus("/", Status.OK, Optional.absent());
+    leaderRedirectSmokeTest(Status.TEMPORARY_REDIRECT, Optional.empty());
+    assertResponseStatus("/", Status.OK, Optional.empty());
   }
 
   @Test

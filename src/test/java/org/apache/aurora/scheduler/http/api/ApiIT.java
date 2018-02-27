@@ -15,11 +15,13 @@ package org.apache.aurora.scheduler.http.api;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Function;
 
+import javax.servlet.ServletContext;
 import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.net.MediaType;
 import com.google.common.primitives.Bytes;
 import com.google.inject.AbstractModule;
 import com.google.inject.Module;
@@ -49,9 +51,9 @@ public class ApiIT extends AbstractJettyTest {
   }
 
   @Override
-  protected Module getChildServletModule() {
-    return Modules.combine(
-        new ApiModule(),
+  protected Function<ServletContext, Module> getChildServletModule() {
+    return (servletContext) -> Modules.combine(
+        new ApiModule(new ApiModule.Options()),
         new AbstractModule() {
           @Override
           protected void configure() {
@@ -93,11 +95,39 @@ public class ApiIT extends AbstractJettyTest {
   }
 
   @Test
+  public void testThriftJsonUtf8Accepted() throws Exception {
+    expect(thrift.getRoleSummary()).andReturn(new Response()).times(2);
+
+    replayAndStart();
+
+    // We also want to ensure charset parsing is case-insensitive because different browsers have
+    // different default behaviors (Chrome and Safari will change charset to all uppercase, while
+    // Firefox may leave it lowercase.
+    ClientResponse upperCaseUTF = getPlainRequestBuilder(ApiModule.API_PATH)
+        .type("application/vnd.apache.thrift.json; charset=UTF-8")
+        .accept("application/vnd.apache.thrift.json; charset=UTF-8")
+        .post(ClientResponse.class, JSON_FIXTURE);
+    assertEquals(SC_OK, upperCaseUTF.getStatus());
+    assertEquals(
+        "application/vnd.apache.thrift.json",
+        upperCaseUTF.getHeaders().getFirst(CONTENT_TYPE));
+
+    ClientResponse lowerCaseUTF = getPlainRequestBuilder(ApiModule.API_PATH)
+        .type("application/vnd.apache.thrift.json; charset=utf-8")
+        .accept("application/vnd.apache.thrift.json; charset=utf-8")
+        .post(ClientResponse.class, JSON_FIXTURE);
+    assertEquals(SC_OK, lowerCaseUTF.getStatus());
+    assertEquals(
+        "application/vnd.apache.thrift.json",
+        lowerCaseUTF.getHeaders().getFirst(CONTENT_TYPE));
+  }
+
+  @Test
   public void testUnknownContentTypeRejected() throws Exception {
     replayAndStart();
 
     ClientResponse response = getRequestBuilder(ApiModule.API_PATH)
-        .type(MediaType.TEXT_HTML_TYPE)
+        .type(MediaType.PLAIN_TEXT_UTF_8.toString())
         .post(ClientResponse.class, JSON_FIXTURE);
 
     assertEquals(SC_UNSUPPORTED_MEDIA_TYPE, response.getStatus());

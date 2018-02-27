@@ -1,0 +1,31 @@
+.nav-divider {
+  height: 3px;
+  margin-top: -20px;
+}
+
+.navbar {
+  text-transform: uppercase;
+  font-size: 11px;
+  border-radius: 0px;
+  background-color: $main_contrast_color;
+  margin-bottom: 0px;
+}
+
+.navbar-nav>li>a {
+  line-height: 25px;
+  font-size: 14px;
+  color: $content_box_color;
+}
+
+.navbar-nav>li> a:hover {
+  background-color: #444;
+}
+
+.navbar-brand {
+  height: auto;
+  padding: 10px 15px;
+}
+
+.navbar img {
+  height: 35px;
+}

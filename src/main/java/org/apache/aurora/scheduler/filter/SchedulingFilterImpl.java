@@ -13,25 +13,34 @@
  */
 package org.apache.aurora.scheduler.filter;
 
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.Optional;
 import java.util.Set;
 
+import javax.inject.Inject;
+
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Ordering;
 
 import org.apache.aurora.common.inject.TimedInterceptor.Timed;
+import org.apache.aurora.common.quantity.Amount;
+import org.apache.aurora.common.quantity.Time;
+import org.apache.aurora.common.util.Clock;
 import org.apache.aurora.gen.MaintenanceMode;
 import org.apache.aurora.gen.TaskConstraint;
 import org.apache.aurora.scheduler.configuration.ConfigurationManager;
+import org.apache.aurora.scheduler.offers.OfferManagerModule.UnavailabilityThreshold;
 import org.apache.aurora.scheduler.resources.ResourceBag;
 import org.apache.aurora.scheduler.resources.ResourceType;
 import org.apache.aurora.scheduler.storage.entities.IAttribute;
 import org.apache.aurora.scheduler.storage.entities.IConstraint;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
+
+import static java.util.Objects.requireNonNull;
 
 import static org.apache.aurora.gen.MaintenanceMode.DRAINED;
 import static org.apache.aurora.gen.MaintenanceMode.DRAINING;
@@ -42,6 +51,15 @@ import static org.apache.aurora.scheduler.configuration.ConfigurationManager.DED
  * fulfilled, and that tasks are allowed to run on the given machine.
  */
 public class SchedulingFilterImpl implements SchedulingFilter {
+  private final Amount<Long, Time> unavailabilityThreshold;
+  private final Clock clock;
+
+  @Inject
+  public SchedulingFilterImpl(@UnavailabilityThreshold Amount<Long, Time> threshold, Clock clock) {
+    this.unavailabilityThreshold = requireNonNull(threshold);
+    this.clock = requireNonNull(clock);
+  }
+
   private static final Set<MaintenanceMode> VETO_MODES = EnumSet.of(DRAINING, DRAINED);
 
   @VisibleForTesting
@@ -100,13 +118,25 @@ public class SchedulingFilterImpl implements SchedulingFilter {
       }
     }
 
-    return Optional.absent();
+    return Optional.empty();
   }
 
-  private Optional<Veto> getMaintenanceVeto(MaintenanceMode mode) {
+  private Optional<Veto> getAuroraMaintenanceVeto(MaintenanceMode mode) {
     return VETO_MODES.contains(mode)
         ? Optional.of(Veto.maintenance(mode.toString().toLowerCase()))
-        : Optional.absent();
+        : Optional.empty();
+  }
+
+  private Optional<Veto> getMesosMaintenanceVeto(Optional<Instant> unavailabilityStart) {
+    if (unavailabilityStart.isPresent()) {
+      Instant start = unavailabilityStart.get();
+      Instant drainTime = start.minusMillis(unavailabilityThreshold.as(Time.MILLISECONDS));
+
+      if (clock.nowInstant().isAfter(drainTime)) {
+        return Optional.of(Veto.maintenance(DRAINING.toString().toLowerCase()));
+      }
+    }
+    return Optional.empty();
   }
 
   private boolean isDedicated(IHostAttributes attributes) {
@@ -130,9 +160,15 @@ public class SchedulingFilterImpl implements SchedulingFilter {
     }
 
     // 2. Host maintenance check.
-    Optional<Veto> maintenanceVeto = getMaintenanceVeto(resource.getAttributes().getMode());
+    Optional<Veto> maintenanceVeto = getAuroraMaintenanceVeto(resource.getAttributes().getMode());
     if (maintenanceVeto.isPresent()) {
-      return maintenanceVeto.asSet();
+      return ImmutableSet.of(maintenanceVeto.get());
+    }
+
+    Optional<Veto> mesosMaintenanceVeto =
+        getMesosMaintenanceVeto(resource.getUnavailabilityStart());
+    if (mesosMaintenanceVeto.isPresent()) {
+      return ImmutableSet.of(mesosMaintenanceVeto.get());
     }
 
     // 3. Value and limit constraint check.
@@ -142,7 +178,7 @@ public class SchedulingFilterImpl implements SchedulingFilter {
         resource.getAttributes().getAttributes());
 
     if (constraintVeto.isPresent()) {
-      return constraintVeto.asSet();
+      return ImmutableSet.of(constraintVeto.get());
     }
 
     // 4. Resource check (lowest score).

@@ -14,9 +14,9 @@
 package org.apache.aurora.scheduler.stats;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
-import com.google.common.base.Optional;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -35,13 +35,16 @@ import org.apache.aurora.scheduler.resources.ResourceBag;
 import org.apache.aurora.scheduler.resources.ResourceTestUtil;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.MutateWork.NoResult;
-import org.apache.aurora.scheduler.storage.db.DbUtil;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
+import org.apache.aurora.scheduler.storage.mem.MemStorageModule;
 import org.junit.Before;
 import org.junit.Test;
 
+import static org.apache.aurora.gen.Resource.diskMb;
+import static org.apache.aurora.gen.Resource.numCpus;
+import static org.apache.aurora.gen.Resource.ramMb;
 import static org.apache.aurora.gen.ScheduleStatus.ASSIGNED;
 import static org.apache.aurora.gen.ScheduleStatus.FAILED;
 import static org.apache.aurora.gen.ScheduleStatus.FINISHED;
@@ -61,7 +64,7 @@ public class ResourceCounterTest {
 
   private static final Metric ZERO = new Metric(TOTAL_CONSUMED, ResourceBag.EMPTY);
   private static final long GB = 1024;
-  private static final Optional<String> NOT_DEDICATED = Optional.absent();
+  private static final Optional<String> NOT_DEDICATED = Optional.empty();
 
   private static final boolean PRODUCTION = true;
   private static final boolean NONPRODUCTION = false;
@@ -71,7 +74,7 @@ public class ResourceCounterTest {
 
   @Before
   public void setUp() throws Exception {
-    storage = DbUtil.createStorage();
+    storage = MemStorageModule.newEmptyStorage();
     resourceCounter = new ResourceCounter(storage);
   }
 
@@ -165,9 +168,10 @@ public class ResourceCounterTest {
 
     ScheduledTask task = TaskTestUtil.makeTask(id, JobKeys.from(role, "test", job)).newBuilder();
     TaskConfig config = task.getAssignedTask().getTask()
-        .setNumCpus(numCpus)
-        .setRamMb(ramMb)
-        .setDiskMb(diskMb)
+        .setResources(ImmutableSet.of(
+                numCpus(numCpus),
+                ramMb(ramMb),
+                diskMb(diskMb)))
         .setProduction(production);
 
     if (dedicated.isPresent()) {
