@@ -28,6 +28,7 @@ import javax.inject.Qualifier;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
+import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
@@ -55,12 +56,15 @@ import org.apache.aurora.scheduler.base.Tasks;
 import org.apache.aurora.scheduler.filter.AttributeAggregate;
 import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
+import org.apache.aurora.scheduler.state.ClusterState;
 import org.apache.aurora.scheduler.storage.Storage;
 import org.apache.aurora.scheduler.storage.Storage.StoreProvider;
 import org.apache.aurora.scheduler.storage.entities.IAssignedTask;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
 import org.apache.aurora.scheduler.storage.entities.IScheduledTask;
 import org.apache.aurora.scheduler.storage.entities.ITaskConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static java.lang.annotation.ElementType.FIELD;
 import static java.lang.annotation.ElementType.METHOD;
@@ -75,6 +79,8 @@ import static org.apache.aurora.gen.ScheduleStatus.PENDING;
  */
 @VisibleForTesting
 public class PendingTaskProcessor implements Runnable {
+  private static final Logger LOG = LoggerFactory.getLogger(PendingTaskProcessor.class);
+
   private final Storage storage;
   private final OfferManager offerManager;
   private final PreemptionVictimFilter preemptionVictimFilter;
@@ -167,8 +173,9 @@ public class PendingTaskProcessor implements Runnable {
         TaskGroupKey group = groups.next();
         ITaskConfig task = group.getTask();
 
+        LOG.info("Searching for preemptible slots for {}", group);
         metrics.recordPreemptionAttemptFor(task);
-        // start over only if a different task group is being processed
+        // Start over only if a different task group is being processed
         if (!group.equals(lastGroup)) {
           slaveIterator = allSlaves.iterator();
         }
@@ -185,6 +192,13 @@ public class PendingTaskProcessor implements Runnable {
           metrics.recordSlotSearchResult(candidates, task);
           if (candidates.isPresent()) {
             // Slot found -> remove slave to avoid multiple task reservations.
+            Iterable<String> candidateTaskIds = Iterables.transform(
+                candidates.get(),
+                PreemptionVictim::getTaskId);
+            LOG.info("Found preemptible slot on agent {} for {} with candidates {}",
+                slaveId,
+                group,
+                Joiner.on(",").join(candidateTaskIds));
             slaveIterator.remove();
             slotCache.put(new PreemptionProposal(candidates.get(), slaveId), group);
             matched = true;
@@ -193,6 +207,7 @@ public class PendingTaskProcessor implements Runnable {
         }
         if (!matched) {
           // No slot found for the group -> remove group and reset group iterator.
+          LOG.info("Could not find preemptible slot for {}", group);
           pendingGroups.removeAll(ImmutableSet.of(group));
           groups = Iterators.consumingIterator(pendingGroups.iterator());
           metrics.recordUnmatchedTask();

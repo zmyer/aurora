@@ -40,6 +40,7 @@ import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.filter.AttributeAggregate;
 import org.apache.aurora.scheduler.offers.HostOffer;
 import org.apache.aurora.scheduler.offers.OfferManager;
+import org.apache.aurora.scheduler.state.ClusterState;
 import org.apache.aurora.scheduler.stats.CachedCounters;
 import org.apache.aurora.scheduler.storage.entities.IHostAttributes;
 import org.apache.aurora.scheduler.storage.entities.IJobKey;
@@ -54,7 +55,9 @@ import org.junit.Test;
 import static org.apache.aurora.gen.ScheduleStatus.PENDING;
 import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.TASK_PROCESSOR_RUN_NAME;
 import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.UNMATCHED_TASKS;
+import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.attemptsByJobStatName;
 import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.attemptsStatName;
+import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.slotSearchByJobStatName;
 import static org.apache.aurora.scheduler.preemptor.PreemptorMetrics.slotSearchStatName;
 import static org.easymock.EasyMock.anyObject;
 import static org.easymock.EasyMock.eq;
@@ -131,7 +134,11 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     slotFinder.run();
     assertEquals(1L, statsProvider.getLongValue(TASK_PROCESSOR_RUN_NAME));
     assertEquals(2L, statsProvider.getLongValue(attemptsStatName(true)));
+    assertEquals(1L, statsProvider.getLongValue(attemptsByJobStatName(JOB_A)));
+    assertEquals(1L, statsProvider.getLongValue(attemptsByJobStatName(JOB_B)));
     assertEquals(2L, statsProvider.getLongValue(slotSearchStatName(true, true)));
+    assertEquals(1L, statsProvider.getLongValue(slotSearchByJobStatName(true, JOB_A)));
+    assertEquals(1L, statsProvider.getLongValue(slotSearchByJobStatName(true, JOB_B)));
     assertEquals(0L, statsProvider.getLongValue(slotSearchStatName(false, true)));
     assertEquals(0L, statsProvider.getLongValue(UNMATCHED_TASKS));
     assertEquals(2L, statsProvider.getLongValue(CACHE_SIZE_STAT_NAME));
@@ -152,8 +159,10 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     slotFinder.run();
     assertEquals(1L, statsProvider.getLongValue(TASK_PROCESSOR_RUN_NAME));
     assertEquals(1L, statsProvider.getLongValue(attemptsStatName(true)));
+    assertEquals(1L, statsProvider.getLongValue(attemptsByJobStatName(JOB_A)));
     assertEquals(0L, statsProvider.getLongValue(slotSearchStatName(true, true)));
     assertEquals(1L, statsProvider.getLongValue(slotSearchStatName(false, true)));
+    assertEquals(1L, statsProvider.getLongValue(slotSearchByJobStatName(false, JOB_A)));
     assertEquals(1L, statsProvider.getLongValue(UNMATCHED_TASKS));
   }
 
@@ -205,7 +214,10 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     assertEquals(slotCache.get(proposal2), Optional.of(group(task5)));
     assertEquals(1L, statsProvider.getLongValue(TASK_PROCESSOR_RUN_NAME));
     assertEquals(3L, statsProvider.getLongValue(attemptsStatName(true)));
+    assertEquals(1L, statsProvider.getLongValue(attemptsByJobStatName(JOB_A)));
+    assertEquals(2L, statsProvider.getLongValue(attemptsByJobStatName(JOB_B)));
     assertEquals(2L, statsProvider.getLongValue(slotSearchStatName(true, true)));
+    assertEquals(2L, statsProvider.getLongValue(slotSearchByJobStatName(true, JOB_B)));
 
     // TODO(wfarner): This test depends on the iteration order of a hash set (the set containing
     // task groups), and as a result this stat could be 0 or 2 depending on which group is
@@ -226,6 +238,7 @@ public class PendingTaskProcessorTest extends EasyMockTest {
     slotFinder.run();
     assertEquals(1L, statsProvider.getLongValue(TASK_PROCESSOR_RUN_NAME));
     assertEquals(0L, statsProvider.getLongValue(attemptsStatName(true)));
+    assertEquals(0L, statsProvider.getLongValue(attemptsStatName(false)));
     assertEquals(0L, statsProvider.getLongValue(slotSearchStatName(true, true)));
     assertEquals(0L, statsProvider.getLongValue(slotSearchStatName(false, true)));
     assertEquals(0L, statsProvider.getLongValue(UNMATCHED_TASKS));

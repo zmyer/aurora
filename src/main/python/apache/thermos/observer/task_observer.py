@@ -30,9 +30,10 @@ from twitter.common.lang import Lockable
 from twitter.common.quantity import Amount, Time
 
 from apache.thermos.common.path import TaskPath
+from apache.thermos.monitoring.disk import DiskCollectorSettings
 from apache.thermos.monitoring.monitor import TaskMonitor
 from apache.thermos.monitoring.process import ProcessSample
-from apache.thermos.monitoring.resource import TaskResourceMonitor
+from apache.thermos.monitoring.resource import DiskCollectorProvider, TaskResourceMonitor
 
 from .detector import ObserverTaskDetector
 from .observed_task import ActiveObservedTask, FinishedObservedTask
@@ -54,11 +55,14 @@ class TaskObserver(ExceptionalThread, Lockable):
 
   POLLING_INTERVAL = Amount(5, Time.SECONDS)
 
-  def __init__(self,
-               path_detector,
-               interval=POLLING_INTERVAL,
-               task_process_collection_interval=TaskResourceMonitor.PROCESS_COLLECTION_INTERVAL,
-               task_disk_collection_interval=TaskResourceMonitor.DISK_COLLECTION_INTERVAL):
+  def __init__(
+      self,
+      path_detector,
+      interval=POLLING_INTERVAL,
+      task_process_collection_interval=TaskResourceMonitor.PROCESS_COLLECTION_INTERVAL,
+      enable_mesos_disk_collector=False,
+      disk_collector_settings=DiskCollectorSettings()):
+
     self._detector = ObserverTaskDetector(
         path_detector,
         self.__on_active,
@@ -66,7 +70,8 @@ class TaskObserver(ExceptionalThread, Lockable):
         self.__on_removed)
     self._interval = interval
     self._task_process_collection_interval = task_process_collection_interval
-    self._task_disk_collection_interval = task_disk_collection_interval
+    self._enable_mesos_disk_collector = enable_mesos_disk_collector
+    self._disk_collector_settings = disk_collector_settings
     self._active_tasks = {}    # task_id => ActiveObservedTask
     self._finished_tasks = {}  # task_id => FinishedObservedTask
     self._stop_event = threading.Event()
@@ -96,33 +101,38 @@ class TaskObserver(ExceptionalThread, Lockable):
     ExceptionalThread.start(self)
 
   def __on_active(self, root, task_id):
-    log.debug('on_active(%r, %r)' % (root, task_id))
+    log.debug('on_active(%r, %r)', root, task_id)
     if task_id in self.finished_tasks:
-      log.error('Found an active task (%s) in finished tasks?' % task_id)
+      log.error('Found an active task (%s) in finished tasks?', task_id)
       return
     task_monitor = TaskMonitor(root, task_id)
+
+    disk_collector_provider = DiskCollectorProvider(
+      self._enable_mesos_disk_collector,
+      self._disk_collector_settings)
+
     resource_monitor = TaskResourceMonitor(
         task_id,
         task_monitor,
+        disk_collector_provider=disk_collector_provider,
         process_collection_interval=self._task_process_collection_interval,
-        disk_collection_interval=self._task_disk_collection_interval)
+        disk_collection_interval=self._disk_collector_settings.disk_collection_interval)
     resource_monitor.start()
     self._active_tasks[task_id] = ActiveObservedTask(
         root,
         task_id,
         task_monitor,
-        resource_monitor
-    )
+        resource_monitor)
 
   def __on_finished(self, root, task_id):
-    log.debug('on_finished(%r, %r)' % (root, task_id))
+    log.debug('on_finished(%r, %r)', root, task_id)
     active_task = self._active_tasks.pop(task_id, None)
     if active_task:
       active_task.resource_monitor.kill()
     self._finished_tasks[task_id] = FinishedObservedTask(root, task_id)
 
   def __on_removed(self, root, task_id):
-    log.debug('on_removed(%r, %r)' % (root, task_id))
+    log.debug('on_removed(%r, %r)', root, task_id)
     active_task = self._active_tasks.pop(task_id, None)
     if active_task:
       active_task.resource_monitor.kill()
@@ -139,7 +149,7 @@ class TaskObserver(ExceptionalThread, Lockable):
       with self.lock:
         start = time.time()
         self._detector.refresh()
-        log.debug("TaskObserver: finished checkpoint refresh in %.2fs" % (time.time() - start))
+        log.debug("TaskObserver: finished checkpoint refresh in %.2fs", time.time() - start)
 
   @Lockable.sync
   def process_from_name(self, task_id, process_id):
@@ -178,7 +188,7 @@ class TaskObserver(ExceptionalThread, Lockable):
     }.get(type, None)
 
     if tasks is None:
-      log.error('Unknown task type %s' % type)
+      log.error('Unknown task type %s', type)
       return {}
 
     return tasks
@@ -313,7 +323,7 @@ class TaskObserver(ExceptionalThread, Lockable):
       resource_sample = self.active_tasks[task_id].resource_monitor.sample()[1]
       sample = resource_sample.process_sample.to_dict()
       sample['disk'] = resource_sample.disk_usage
-      log.debug("Got sample for task %s: %s" % (task_id, sample))
+      log.debug("Got sample for task %s: %s", task_id, sample)
     return sample
 
   @Lockable.sync
@@ -390,7 +400,7 @@ class TaskObserver(ExceptionalThread, Lockable):
     task = self.all_tasks[task_id].task
     if task is None:
       # TODO(wickman)  Can this happen?
-      log.error('Could not find task: %s' % task_id)
+      log.error('Could not find task: %s', task_id)
       return {}
 
     state = self.raw_state(task_id)
@@ -425,7 +435,7 @@ class TaskObserver(ExceptionalThread, Lockable):
     if task_id not in self.active_tasks:
       return ProcessSample.empty().to_dict()
     sample = self.active_tasks[task_id].resource_monitor.sample_by_process(process_name).to_dict()
-    log.debug('Resource consumption (%s, %s) => %s' % (task_id, process_name, sample))
+    log.debug('Resource consumption (%s, %s) => %s', task_id, process_name, sample)
     return sample
 
   @Lockable.sync

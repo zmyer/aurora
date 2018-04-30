@@ -39,9 +39,11 @@ import org.apache.aurora.scheduler.base.TaskGroupKey;
 import org.apache.aurora.scheduler.config.CliOptions;
 import org.apache.aurora.scheduler.config.splitters.CommaSplitter;
 import org.apache.aurora.scheduler.config.types.TimeAmount;
+import org.apache.aurora.scheduler.config.validators.PositiveAmount;
 import org.apache.aurora.scheduler.config.validators.PositiveNumber;
 import org.apache.aurora.scheduler.events.PubsubEventModule;
 import org.apache.aurora.scheduler.preemptor.BiCache.BiCacheSettings;
+import org.apache.aurora.scheduler.state.ClusterStateImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,15 +65,24 @@ public class PreemptorModule extends AbstractModule {
     public boolean enablePreemptor = true;
 
     @Parameter(names = "-preemption_delay",
+        validateValueWith = PositiveAmount.class,
         description =
             "Time interval after which a pending task becomes eligible to preempt other tasks")
     public TimeAmount preemptionDelay = new TimeAmount(3, Time.MINUTES);
 
     @Parameter(names = "-preemption_slot_hold_time",
+        validateValueWith = PositiveAmount.class,
         description = "Time to hold a preemption slot found before it is discarded.")
     public TimeAmount preemptionSlotHoldTime = new TimeAmount(5, Time.MINUTES);
 
+    @Parameter(names = "-preemption_slot_search_initial_delay",
+        validateValueWith = PositiveAmount.class,
+        description =
+            "Initial amount of time to delay preemption slot searching after scheduler start up.")
+    public TimeAmount preemptionSlotSearchInitialDelay = new TimeAmount(3, Time.MINUTES);
+
     @Parameter(names = "-preemption_slot_search_interval",
+        validateValueWith = PositiveAmount.class,
         description = "Time interval between pending task preemption slot searches.")
     public TimeAmount preemptionSlotSearchInterval = new TimeAmount(1, Time.MINUTES);
 
@@ -123,18 +134,18 @@ public class PreemptorModule extends AbstractModule {
           bind(new TypeLiteral<Integer>() { })
               .annotatedWith(PendingTaskProcessor.ReservationBatchSize.class)
               .toInstance(options.reservationMaxBatchSize);
-          bind(ClusterState.class).to(ClusterStateImpl.class);
-          bind(ClusterStateImpl.class).in(Singleton.class);
-          expose(ClusterStateImpl.class);
 
           for (Module module: MoreModules.instantiateAll(options.slotFinderModules, cliOptions)) {
             install(module);
           }
 
+          // We need to convert the initial delay time unit to be the same as the search interval
+          long preemptionSlotSearchInitialDelay = options.preemptionSlotSearchInitialDelay
+              .as(options.preemptionSlotSearchInterval.getUnit());
           bind(PreemptorService.class).in(Singleton.class);
           bind(AbstractScheduledService.Scheduler.class).toInstance(
               AbstractScheduledService.Scheduler.newFixedRateSchedule(
-                  0L,
+                  preemptionSlotSearchInitialDelay,
                   options.preemptionSlotSearchInterval.getValue(),
                   options.preemptionSlotSearchInterval.getUnit().getTimeUnit()));
 
