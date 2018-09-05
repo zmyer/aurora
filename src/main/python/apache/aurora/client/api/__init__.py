@@ -33,8 +33,10 @@ from gen.apache.aurora.api.ttypes import (
     JobUpdateQuery,
     JobUpdateRequest,
     Metadata,
+    PercentageSlaPolicy,
     Resource,
     ResourceAggregate,
+    SlaPolicy,
     TaskQuery
 )
 
@@ -298,6 +300,16 @@ class AuroraClientAPI(object):
     log.info("Draining tasks on: %s" % hosts.hostNames)
     return self._scheduler_proxy.drainHosts(hosts)
 
+  def sla_drain_hosts(self, hosts, percentage=None, duration=None, timeout=None):
+    log.info("Asking scheduler to drain tasks by SLA on: %s" % hosts.hostNames)
+    return self._scheduler_proxy.slaDrainHosts(
+      hosts,
+      SlaPolicy(
+        percentageSlaPolicy=PercentageSlaPolicy(
+          percentage=percentage,
+          durationSecs=duration)),
+      timeout)
+
   def maintenance_status(self, hosts):
     log.info("Maintenance status for: %s" % hosts.hostNames)
     # read-only calls are retriable.
@@ -317,7 +329,7 @@ class AuroraClientAPI(object):
               % (role, cpu, ram, disk))
     return self._scheduler_proxy.setQuota(
         role,
-        ResourceAggregate(cpu, ram, disk, frozenset([
+        ResourceAggregate(frozenset([
             Resource(numCpus=cpu),
             Resource(ramMb=ram),
             Resource(diskMb=disk)])))

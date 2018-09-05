@@ -245,6 +245,37 @@ struct PartitionPolicy {
   2: optional i64 delaySecs
 }
 
+/** SLA requirements expressed as the percentage of instances to be RUNNING every durationSecs */
+struct PercentageSlaPolicy {
+  /* The percentage of active instances required every `durationSecs`. */
+  1: double percentage
+  /** Minimum time duration a task needs to be `RUNNING` to be treated as active */
+  2: i64 durationSecs
+}
+
+/** SLA requirements expressed as the number of instances to be RUNNING every durationSecs */
+struct CountSlaPolicy {
+  /** The number of active instances required every `durationSecs` */
+  1: i64 count
+  /** Minimum time duration a task needs to be `RUNNING` to be treated as active */
+  2: i64 durationSecs
+}
+
+/** SLA requirements to be delegated to an external coordinator */
+struct CoordinatorSlaPolicy {
+  /** URL for the coordinator service that needs to be contacted for SLA checks */
+  1: string coordinatorUrl
+  /** Field in the Coordinator response json indicating if the action is allowed or not */
+  2: string statusKey
+}
+
+/** SLA requirements expressed in one of the many types */
+union SlaPolicy {
+  1: PercentageSlaPolicy percentageSlaPolicy
+  2: CountSlaPolicy countSlaPolicy
+  3: CoordinatorSlaPolicy coordinatorSlaPolicy
+}
+
 /** Description of the tasks contained within a job. */
 struct TaskConfig {
  /** Job task belongs to. */
@@ -279,6 +310,8 @@ struct TaskConfig {
  27: optional set<Metadata> metadata
  /** Policy for how to deal with task partitions */
  34: optional PartitionPolicy partitionPolicy
+ /** SLA requirements to be met during maintenance */
+ 35: optional SlaPolicy slaPolicy
 
  // This field is deliberately placed at the end to work around a bug in the immutable wrapper
  // code generator.  See AURORA-1185 for details.
@@ -287,15 +320,6 @@ struct TaskConfig {
 }
 
 struct ResourceAggregate {
-  // TODO(maxim): Deprecated. See AURORA-1707.
-  /** Number of CPU cores allotted. */
-  1: double numCpus
-  // TODO(maxim): Deprecated. See AURORA-1707.
-  /** Megabytes of RAM allotted. */
-  2: i64 ramMb
-  // TODO(maxim): Deprecated. See AURORA-1707.
-  /** Megabytes of disk space allotted. */
-  3: i64 diskMb
   /** Aggregated resource values. */
   4: set<Resource> resources
 }
@@ -553,16 +577,16 @@ struct GetJobsResult {
  * (terms are AND'ed together).
  */
 struct TaskQuery {
-  14: string role
-  9: string environment
-  2: string jobName
-  4: set<string> taskIds
-  5: set<ScheduleStatus> statuses
-  7: set<i32> instanceIds
-  10: set<string> slaveHosts
-  11: set<JobKey> jobKeys
-  12: i32 offset
-  13: i32 limit
+  14: optional string role
+  9: optional string environment
+  2: optional string jobName
+  4: optional set<string> taskIds
+  5: optional set<ScheduleStatus> statuses
+  7: optional set<i32> instanceIds
+  10: optional set<string> slaveHosts
+  11: optional set<JobKey> jobKeys
+  12: optional i32 offset
+  13: optional i32 limit
 }
 
 struct HostStatus {
@@ -718,13 +742,19 @@ struct JobUpdateSettings {
    */
   8: bool waitForBatchCompletion
 
- /**
-  * If set, requires external calls to pulseJobUpdate RPC within the specified rate for the
-  * update to make progress. If no pulses received within specified interval the update will
-  * block. A blocked update is unable to continue but retains its current status. It may only get
-  * unblocked by a fresh pulseJobUpdate call.
-  */
+  /**
+   * If set, requires external calls to pulseJobUpdate RPC within the specified rate for the
+   * update to make progress. If no pulses received within specified interval the update will
+   * block. A blocked update is unable to continue but retains its current status. It may only get
+   * unblocked by a fresh pulseJobUpdate call.
+   */
   9: optional i32 blockIfNoPulsesAfterMs
+
+  /**
+   * If true, updates will obey the SLA requirements of the tasks being updated. If the SLA policy
+   * differs between the old and new task configurations, updates will use the newest configuration.
+   */
+  10: optional bool slaAware
 }
 
 /** Event marking a state transition in job update lifecycle. */
@@ -755,6 +785,9 @@ struct JobInstanceUpdateEvent {
 
   /** Job update action taken on the instance. */
   3: JobUpdateAction action
+
+  /** Optional message explaining the instance update event. */
+  4: optional string message
 }
 
 /** Maps instance IDs to TaskConfigs it. */
@@ -865,6 +898,13 @@ struct JobUpdateQuery {
 
   /** Number or records to serve. Used by pagination. */
   7: i32 limit
+}
+
+struct HostMaintenanceRequest {
+  1: string host
+  2: SlaPolicy defaultSlaPolicy
+  3: i64 timeoutSecs
+  4: i64 createdTimestampMs
 }
 
 struct ListBackupsResult {
@@ -1203,6 +1243,12 @@ service AuroraAdmin extends AuroraSchedulerManager {
 
   /** Set the given hosts back into serving mode. */
   Response endMaintenance(1: Hosts hosts)
+
+  /**
+   * Ask scheduler to put hosts into DRAINING mode and move scheduled tasks off of the hosts
+   * such that its SLA requirements are satisfied. Use defaultSlaPolicy if it is not set for a task.
+   **/
+  Response slaDrainHosts(1: Hosts hosts, 2: SlaPolicy defaultSlaPolicy, 3: i64 timeoutSecs)
 
   /** Start a storage snapshot and block until it completes. */
   Response snapshot()

@@ -21,6 +21,7 @@ from apache.thermos.config.schema import *
 
 from gen.apache.aurora.api.constants import AURORA_EXECUTOR_NAME
 
+
 # TODO(wickman) Bind {{mesos.instance}} to %shard_id%
 class MesosContext(Struct):
   # The instance id (i.e. replica id, shard id) in the context of a task
@@ -36,6 +37,7 @@ class UpdateConfig(Struct):
   rollback_on_failure         = Default(Boolean, True)
   wait_for_batch_completion   = Default(Boolean, False)
   pulse_interval_secs         = Integer
+  sla_aware                   = Default(Boolean, False)
 
 
 class HttpHealthChecker(Struct):
@@ -168,6 +170,22 @@ class ExecutorConfig(Struct):
   name = Default(String, AURORA_EXECUTOR_NAME)
   data = Default(String, "")
 
+
+class PercentageSlaPolicy(Struct):
+  percentage = Required(Float)
+  duration_secs = Required(Integer)
+
+
+class CountSlaPolicy(Struct):
+  count = Required(Integer)
+  duration_secs = Required(Integer)
+
+
+class CoordinatorSlaPolicy(Struct):
+  coordinator_url = Required(String)
+  status_key = Default(String, "drain")
+
+
 class MesosJob(Struct):
   name          = Default(String, '{{task.name}}')
   role          = Required(String)
@@ -199,6 +217,7 @@ class MesosJob(Struct):
   enable_hooks = Default(Boolean, False)  # enable client API hooks; from env python-list 'hooks'
 
   partition_policy = PartitionPolicy
+  sla_policy = Choice([CoordinatorSlaPolicy, CountSlaPolicy, PercentageSlaPolicy])
 
   # Specifying a `Container` with a `docker` property for Docker jobs is deprecated, instead just
   # specify the value of the container property to be a `Docker` container directly.

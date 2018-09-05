@@ -13,12 +13,43 @@
  */
 package org.apache.aurora.scheduler.storage.mem;
 
+import com.google.inject.AbstractModule;
+import com.google.inject.Module;
+import com.google.inject.util.Modules;
+
+import org.apache.aurora.common.stats.StatsProvider;
 import org.apache.aurora.scheduler.storage.AbstractAttributeStoreTest;
-import org.apache.aurora.scheduler.storage.Storage;
+import org.apache.aurora.scheduler.testing.FakeStatsProvider;
+import org.junit.Test;
+
+import static org.apache.aurora.scheduler.storage.mem.MemAttributeStore.ATTRIBUTE_STORE_SIZE;
+import static org.junit.Assert.assertEquals;
 
 public class MemAttributeStoreTest extends AbstractAttributeStoreTest {
+
+  private FakeStatsProvider statsProvider;
+
   @Override
-  protected Storage createStorage() {
-    return MemStorageModule.newEmptyStorage();
+  protected Module getStorageModule() {
+    statsProvider = new FakeStatsProvider();
+    return Modules.combine(
+        new MemStorageModule(),
+        new AbstractModule() {
+          @Override
+          protected void configure() {
+            bind(StatsProvider.class).toInstance(statsProvider);
+          }
+        });
+  }
+
+  @Test
+  public void testStoreSize() {
+    assertEquals(0L, statsProvider.getLongValue(ATTRIBUTE_STORE_SIZE));
+    insert(HOST_A_ATTRS);
+    assertEquals(1L, statsProvider.getLongValue(ATTRIBUTE_STORE_SIZE));
+    insert(HOST_B_ATTRS);
+    assertEquals(2L, statsProvider.getLongValue(ATTRIBUTE_STORE_SIZE));
+    truncate();
+    assertEquals(0L, statsProvider.getLongValue(ATTRIBUTE_STORE_SIZE));
   }
 }
